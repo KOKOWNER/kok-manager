@@ -188,7 +188,7 @@ header() {
     echo -e "${C}----------------------------------------------------------------------${N}"
     echo -e "              ${C}PREMIUM SSH & VPN SERVICES${N}"
     echo -e "              ${Y}Developed by: KOK ${N}<🇲🇲/>"
-    echo -e " ${Y}System License Status : ${G}Activated (Verified)${N}"
+    echo -e " ${Y}System License Expiry : ${G}Lifetime (Verified)${N}"
     echo -e "${C}----------------------------------------------------------------------${N}"
     echo -e "${B}======================================================================${N}"
     printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "OS" "$osname" "Uptime:" "$up"
@@ -460,7 +460,16 @@ dnstt_install_go() {
 
 dnstt_ensure_binary() {
     [ -x "$DNSTT_BIN" ] && return 0
-    echo -e "${Y}Building dnstt-server (one-time, may take a few minutes)...${N}"
+    local arch=""
+    case "$(uname -m)" in x86_64) arch="amd64";; aarch64|arm64) arch="arm64";; esac
+    echo -e "${C}📥 Downloading pre-compiled DNSTT server binary...${N}"
+    echo -e "${C}ℹ Detected $(uname -m) (${arch:-unknown}) architecture.${N}"
+    if [ -n "$arch" ]; then
+        curl -fsSL --max-time 180 "$DNSTT_REL/dnstt-server-linux-$arch" -o "$DNSTT_BIN" 2>/dev/null && chmod +x "$DNSTT_BIN"
+    fi
+    if [ -x "$DNSTT_BIN" ]; then echo -e "${G}DNSTT server binary ready.${N}"; return 0; fi
+    rm -f "$DNSTT_BIN"
+    echo -e "${Y}Pre-compiled binary is not published yet - building from source instead (one-time, a few minutes)...${N}"
     if command -v apt-get >/dev/null 2>&1 && ! command -v git >/dev/null 2>&1; then
         apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq git >/dev/null 2>&1
     fi
@@ -472,7 +481,7 @@ dnstt_ensure_binary() {
     ( cd "$tmp/dnstt/dnstt-server" && go build -o "$DNSTT_BIN" . ) >/dev/null 2>&1
     rm -rf "$tmp"
     [ -x "$DNSTT_BIN" ] || { echo -e "${R}dnstt-server build failed.${N}"; return 1; }
-    echo -e "${G}dnstt-server ready.${N}"
+    echo -e "${G}dnstt-server built and ready.${N}"
     return 0
 }
 
@@ -494,16 +503,63 @@ dnstt_fw_del() {
     return 0
 }
 
-dnstt_write_units() {
-    local domain="$1"
-    cat > /etc/systemd/system/kok-dnstt.service <<EOF
+DNSTT_REL="https://github.com/KOKOWNER/kok-manager/releases/download/tools-v1"
+
+fw_note() {
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+        echo -e "${Y}⚠ UFW firewall is active - make sure the port is allowed.${N}"
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        echo -e "${Y}⚠ firewalld is active - make sure the port is allowed.${N}"
+    else
+        echo -e "${C}ℹ No active firewall (UFW or firewalld) detected. Assuming ports are open.${N}"
+    fi
+}
+
+dnstt_restore_resolved() {
+    # undo the systemd-resolved stop done by dnstt_setup (only if WE stopped it)
+    [ -f "$DNSTT_DIR/.resolved_stopped" ] || return 0
+    local target
+    target="$(cat "$DNSTT_DIR/resolv.target" 2>/dev/null)"
+    [ -z "$target" ] && target="/run/systemd/resolve/stub-resolv.conf"
+    rm -f /etc/resolv.conf
+    ln -s "$target" /etc/resolv.conf 2>/dev/null
+    systemctl enable systemd-resolved >/dev/null 2>&1
+    systemctl start systemd-resolved 2>/dev/null
+    rm -f "$DNSTT_DIR/.resolved_stopped" "$DNSTT_DIR/resolv.target"
+    return 0
+}
+
+dnstt_details() {
+    local domain pub fwd ns
+    domain="$(cat "$DNSTT_DIR/domain.txt" 2>/dev/null)"
+    pub="$(cat "$DNSTT_DIR/server.pub" 2>/dev/null)"
+    fwd="$(cat "$DNSTT_DIR/forward.txt" 2>/dev/null)"
+    ns="$(cat "$DNSTT_DIR/ns.txt" 2>/dev/null)"
+    echo -e "${C}==================================================${N}"
+    echo -e "${W}        📡 DNSTT Connection Details${N}"
+    echo -e "${C}==================================================${N}"
+    echo
+    echo -e "${W}Your connection details:${N}"
+    echo -e " ${C}-${N} Tunnel Domain: ${G}$domain${N}"
+    echo -e " ${C}-${N} Public Key: ${G}$pub${N}"
+    echo -e " ${C}-${N} Forwarding To: ${G}$fwd${N}"
+    echo -e " ${C}-${N} NS Record: ${G}$domain${N}"
+    echo -e " ${C}-${N} Action Required: ${Y}Ensure your SSH client is configured to use the DNS tunnel.${N}"
+    echo
+    echo -e "${W}Use these details in your client configuration.${N}"
+    echo -e "${C}ℹ One-time DNS records (DNS only / grey cloud):  ${W}A${N} ${G}$ns${N} -> ${G}$(pub_ip)${N}   |   ${W}NS${N} ${G}$domain${N} -> ${G}$ns${N}"
+}
+
+dnstt_write_unit() { # $1 domain  $2 upstream  $3 mtu (may be empty)
+    local domain="$1" upstream="$2" mtu="$3" mtuopt=""
+    [ -n "$mtu" ] && mtuopt="-mtu $mtu"
+    cat > /etc/systemd/system/dnstt.service <<EOF
 [Unit]
-Description=KOK DNSTT (SlowDNS) server
-After=network.target kok-dnstt-fw.service
-Wants=kok-dnstt-fw.service
+Description=DNSTT (DNS Tunnel) server - KOK Manager
+After=network.target
 
 [Service]
-ExecStart=$DNSTT_BIN -udp :5300 -privkey-file $DNSTT_DIR/server.key $domain 127.0.0.1:$(ssh_port)
+ExecStart=$DNSTT_BIN -udp :53 -privkey-file $DNSTT_DIR/server.key $mtuopt $domain $upstream
 Restart=always
 RestartSec=3
 User=root
@@ -511,155 +567,173 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-    cat > /etc/systemd/system/kok-dnstt-fw.service <<'EOF'
-[Unit]
-Description=KOK DNSTT UDP 53 redirect to 5300
-After=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c 'iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300'
-ExecStart=/bin/sh -c 'ip6tables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || ip6tables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300; true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
     systemctl daemon-reload 2>/dev/null
-    systemctl enable kok-dnstt-fw.service kok-dnstt.service >/dev/null 2>&1
 }
 
-dnstt_dns_help() {
-    local domain="$1" parent nshost
-    parent="$(echo "$domain" | cut -d. -f2-)"
-    nshost="ns.$parent"
-    echo -e "${Y}DNS records to add ONE TIME in your domain panel (Cloudflare: DNS only / grey cloud):${N}"
-    echo -e "   1) Type ${W}A${N}    Name ${W}$nshost${N}        ->  ${W}$(pub_ip)${N}"
-    echo -e "   2) Type ${W}NS${N}   Name ${W}$domain${N}   ->  ${W}$nshost${N}"
-    echo -e " ${W}(Tip: menu [13] CloudFlare Free Domain can create these records for you automatically.)${N}"
-}
-
-dnstt_choose_key() { # echoes privkey hex on stdout, prompts on stderr
-    local choice priv seed tries pub tmpk
-    echo "Key choice:" >&2
-    echo "  [1] Auto-generate a new key" >&2
-    echo "  [2] Use MY OWN private key (favourite numbers -> your public key is derived from it)" >&2
-    read -rp " Choose [1]: " choice; choice="${choice:-1}"
-    if [ "$choice" = "2" ]; then
-        echo "Your private key = exactly 64 characters: digits 0-9 and letters a-f only." >&2
-        echo "Example: your favourite numbers repeated, like 241120241120... (64 chars)." >&2
-        echo "Same private key on any server always gives the SAME public key for your customers." >&2
-        tries=0
-        while [ $tries -lt 3 ]; do
-            read -rp "Enter your 64-char private key (ENTER = cancel): " seed
-            seed="$(printf '%s' "$seed" | tr -d ' ' | tr 'A-Z' 'a-z')"
-            [ -z "$seed" ] && { echo ""; return; }
-            [[ "$seed" =~ ^[0-9a-f]{64}$ ]] && break
-            echo "Not valid: must be exactly 64 chars of 0-9 / a-f (yours: ${#seed} chars)." >&2
-            tries=$((tries+1)); seed=""
-        done
-        [ -z "$seed" ] && { echo ""; return; }
-        priv="$seed"
-    else
-        priv="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
-    fi
-    echo "$priv"
-}
-
-dnstt_setup() { # $1 = preset domain (optional)
-    echo -e "${Y}--- DNSTT (SlowDNS) SETUP ---${N}"
+dnstt_setup() { # $1 = preset tunnel domain (optional, from CloudFlare flow)
+    echo -e "${M}--- 📡 DNSTT (DNS Tunnel) Management ---${N}"
     mkdir -p "$DNSTT_DIR"; chmod 700 "$DNSTT_DIR"
-    local domain priv pub
-    domain="$1"
-    if [ -z "$domain" ]; then
-        read -rp "Nameserver / tunnel domain (e.g. t.yourdomain.com): " domain
+    local preset="$1" fchoice upstream fwdlabel mode ns_domain domain mtu parent rand
+    # migrate the legacy v2 units (kok-dnstt + iptables redirect), if present
+    if [ -f /etc/systemd/system/kok-dnstt.service ]; then
+        systemctl disable --now kok-dnstt.service kok-dnstt-fw.service >/dev/null 2>&1
+        rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service
+        systemctl daemon-reload 2>/dev/null
+        dnstt_fw_del
     fi
-    domain="$(printf '%s' "$domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
-    if ! [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$domain" != *.* ]]; then
-        echo -e "${R}Invalid domain.${N}"; press_enter; return
+    systemctl stop dnstt.service >/dev/null 2>&1
+    echo -e "${C}⚙ Forcing release of Port 53 (stopping systemd-resolved)...${N}"
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        systemctl stop systemd-resolved 2>/dev/null
+        systemctl disable systemd-resolved >/dev/null 2>&1
+        if [ -L /etc/resolv.conf ]; then
+            readlink /etc/resolv.conf > "$DNSTT_DIR/resolv.target" 2>/dev/null
+            rm -f /etc/resolv.conf
+            printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        fi
+        touch "$DNSTT_DIR/.resolved_stopped"
     fi
-    priv="$(dnstt_choose_key)"
-    [ -z "$priv" ] && { echo -e "${R}Cancelled.${N}"; press_enter; return; }
-    printf '%s' "$priv" > "$DNSTT_DIR/server.key"; chmod 600 "$DNSTT_DIR/server.key"
-    pub="$(dnstt_derive_pub "$priv")"
-    if [ -z "$pub" ]; then pub="$(dnstt_pub_from_run "$DNSTT_DIR/server.key")"; fi
-    if [ -z "$pub" ]; then
-        echo -e "${R}Could not derive the public key (openssl missing?). Setup stopped.${N}"
+    echo
+    echo -e "${C}🔍 Checking if port 53 (UDP) is available...${N}"
+    if ss -lun 2>/dev/null | awk '{print $5}' | grep -qE ':53$'; then
+        echo -e "${R}❌ Port 53 (UDP) is still in use by another process. Setup stopped.${N}"
         press_enter; return
     fi
-    printf '%s' "$pub" > "$DNSTT_DIR/server.pub"; chmod 644 "$DNSTT_DIR/server.pub"
-    printf '%s' "$domain" > "$DNSTT_DIR/domain.txt"
-    dnstt_ensure_binary || { echo -e "${R}Keys saved, but dnstt-server is not installed yet. Run setup again when the network is OK.${N}"; press_enter; return; }
-    dnstt_write_units "$domain"
-    dnstt_fw_add
-    systemctl restart kok-dnstt.service 2>/dev/null
-    sleep 1
-    log "DNSTT setup domain=$domain"
+    echo -e "${G}✅ Port 53 (UDP) is free to use.${N}"
+    fw_note
     echo
-    if systemctl is-active --quiet kok-dnstt.service 2>/dev/null; then
-        echo -e "${G}DNSTT is RUNNING.${N}"
+    echo -e "${W}Please choose where DNSTT should forward traffic:${N}"
+    echo -e "  ${C}[ 1]${N} ➡ Forward to local SSH service (port $(ssh_port))"
+    echo -e "  ${C}[ 2]${N} ➡ Forward to local V2Ray backend (port 8787)"
+    read -rp "👉 Enter your choice [2]: " fchoice; fchoice="${fchoice:-2}"
+    if [ "$fchoice" = "1" ]; then
+        upstream="127.0.0.1:$(ssh_port)"; fwdlabel="SSH (port $(ssh_port))"
+        echo -e "${C}ℹ DNSTT will forward to SSH on 127.0.0.1:$(ssh_port).${N}"
     else
-        echo -e "${Y}DNSTT service state could not be confirmed here - check: systemctl status kok-dnstt${N}"
+        upstream="127.0.0.1:8787"; fwdlabel="V2Ray (port 8787)"
+        echo -e "${C}ℹ DNSTT will forward to the V2Ray backend on 127.0.0.1:8787.${N}"
     fi
-    echo -e "${C}----------------------------------------${N}"
-    echo -e "${W}        DNSTT (SlowDNS) DETAILS${N}"
-    echo -e "${C}----------------------------------------${N}"
-    echo -e " Nameserver : ${G}$domain${N}"
-    echo -e " Public Key : ${G}$pub${N}"
-    echo -e " Server IP  : ${G}$(pub_ip)${N}"
-    echo -e " SSH Port   : ${G}$(ssh_port)${N}"
-    echo -e "${C}----------------------------------------${N}"
-    dnstt_dns_help "$domain"
+    if [ -n "$preset" ]; then
+        domain="$(printf '%s' "$preset" | tr -d ' ' | tr 'A-Z' 'a-z')"
+        ns_domain="ns.$(echo "$domain" | cut -d. -f2-)"
+        echo -e "${C}ℹ Using the domain from your CloudFlare setup: ${G}$domain${N} (nameserver host: $ns_domain)"
+    else
+        read -rp "👉 Auto-generate DNS records or use custom ones? (auto/custom) [auto]: " mode; mode="${mode:-auto}"
+        if [ "$mode" = "custom" ]; then
+            read -rp "👉 Enter your full nameserver domain (e.g., ns1.yourdomain.com): " ns_domain
+            read -rp "👉 Enter your full tunnel domain (e.g., tun.yourdomain.com): " domain
+        else
+            read -rp "👉 Enter your parent domain (e.g., yourdomain.com): " parent
+            parent="$(printf '%s' "$parent" | tr -d ' ' | tr 'A-Z' 'a-z')"
+            if ! [[ "$parent" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$parent" != *.* ]]; then
+                echo -e "${R}Invalid parent domain.${N}"; press_enter; return
+            fi
+            rand="$(tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 6)"
+            ns_domain="ns$rand.$parent"
+            domain="tun$rand.$parent"
+            echo -e "${C}ℹ Auto-generated nameserver: ${G}$ns_domain${N}"
+            echo -e "${C}ℹ Auto-generated tunnel domain: ${G}$domain${N}"
+        fi
+        ns_domain="$(printf '%s' "$ns_domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
+        domain="$(printf '%s' "$domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
+        if ! [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$domain" != *.* ]] \
+           || ! [[ "$ns_domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$ns_domain" != *.* ]]; then
+            echo -e "${R}Invalid domain.${N}"; press_enter; return
+        fi
+    fi
+    read -rp "👉 Enter MTU value (e.g., 512, 1200) or press [Enter] for default: " mtu
+    if [ -z "$mtu" ]; then
+        echo -e "${C}ℹ Using default MTU.${N}"
+    elif [[ "$mtu" =~ ^[0-9]+$ ]] && [ "$mtu" -ge 100 ] && [ "$mtu" -le 9000 ]; then
+        echo -e "${C}ℹ Using MTU $mtu.${N}"
+    else
+        echo -e "${Y}Invalid MTU - using default.${N}"; mtu=""
+    fi
+    echo
+    dnstt_ensure_binary || { echo -e "${R}DNSTT server binary is not ready. Setup stopped.${N}"; press_enter; return; }
+    echo -e "${C}🔐 Generating cryptographic keys...${N}"
+    "$DNSTT_BIN" -gen-key -privkey-file "$DNSTT_DIR/server.key" -pubkey-file "$DNSTT_DIR/server.pub" 2>/dev/null
+    if [ ! -s "$DNSTT_DIR/server.key" ] || [ ! -s "$DNSTT_DIR/server.pub" ]; then
+        # fallback: parse the printed keys and write the files ourselves
+        local out priv pub
+        out="$("$DNSTT_BIN" -gen-key 2>/dev/null)"
+        priv="$(printf '%s' "$out" | awk '/privkey/{print $2}' | head -1)"
+        pub="$(printf '%s' "$out" | awk '/pubkey/{print $2}' | head -1)"
+        [ -z "$priv" ] || [ -z "$pub" ] && { echo -e "${R}Key generation failed.${N}"; press_enter; return; }
+        printf '%s' "$priv" > "$DNSTT_DIR/server.key"
+        printf '%s' "$pub" > "$DNSTT_DIR/server.pub"
+        echo "privkey written to $DNSTT_DIR/server.key"
+        echo "pubkey written to $DNSTT_DIR/server.pub"
+    fi
+    chmod 600 "$DNSTT_DIR/server.key"; chmod 644 "$DNSTT_DIR/server.pub"
+    echo
+    echo -e "${C}📝 Creating systemd service...${N}"
+    dnstt_write_unit "$domain" "$upstream" "$mtu"
+    echo -e "${C}💾 Saving configuration and starting service...${N}"
+    printf '%s' "$domain" > "$DNSTT_DIR/domain.txt"
+    printf '%s' "$ns_domain" > "$DNSTT_DIR/ns.txt"
+    printf '%s' "$fwdlabel" > "$DNSTT_DIR/forward.txt"
+    printf '%s' "$mtu" > "$DNSTT_DIR/mtu.txt"
+    systemctl enable dnstt.service 2>&1 | grep -i 'created symlink' || true
+    systemctl restart dnstt.service 2>/dev/null
+    sleep 1
+    log "DNSTT setup domain=$domain forward=$fwdlabel mtu=${mtu:-default}"
+    echo
+    if systemctl is-active --quiet dnstt.service 2>/dev/null; then
+        echo -e "${G}✅ SUCCESS: DNSTT has been installed and started!${N}"
+        echo
+        dnstt_details
+    else
+        echo -e "${R}❌ DNSTT service did not start - check: systemctl status dnstt${N}"
+    fi
     press_enter
 }
 
 dnstt_info() {
-    echo -e "${Y}--- DNSTT INFO ---${N}"
-    if [ ! -f "$DNSTT_DIR/domain.txt" ]; then echo "DNSTT is not set up yet. Use Setup first."; press_enter; return; fi
-    local domain pub st
-    domain="$(cat "$DNSTT_DIR/domain.txt")"; pub="$(cat "$DNSTT_DIR/server.pub" 2>/dev/null)"
-    st="$(systemctl is-active kok-dnstt.service 2>/dev/null || echo unknown)"
-    echo -e " Status     : ${G}$st${N}"
-    echo -e " Nameserver : ${G}$domain${N}"
-    echo -e " Public Key : ${G}$pub${N}"
-    echo -e " Server IP  : ${G}$(pub_ip)${N}"
-    echo -e " SSH Port   : ${G}$(ssh_port)${N}"
+    echo -e "${M}--- 📡 DNSTT (DNS Tunnel) Management ---${N}"
+    if [ ! -f "$DNSTT_DIR/domain.txt" ]; then
+        echo "DNSTT is not set up yet. Use Setup first."; press_enter; return
+    fi
+    local st
+    st="$(systemctl is-active dnstt.service 2>/dev/null || echo unknown)"
+    echo -e " Status : ${G}$st${N}"
     echo
-    echo -e "${W}Give your customers exactly these two in their SlowDNS / NPV Tunnel app:${N}"
-    echo -e "   Nameserver : $domain"
-    echo -e "   Public Key : $pub"
+    dnstt_details
     press_enter
 }
 
 dnstt_restart() {
-    systemctl restart kok-dnstt.service 2>/dev/null && echo -e "${G}DNSTT restarted.${N}" || echo -e "${R}Restart failed (not set up?).${N}"
+    systemctl restart dnstt.service 2>/dev/null && echo -e "${G}DNSTT restarted.${N}" || echo -e "${R}Restart failed (not set up?).${N}"
     press_enter
 }
 
 dnstt_remove() {
     read -rp "Remove DNSTT completely? [y/N]: " ans
     [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Cancelled."; press_enter; return; }
+    systemctl disable --now dnstt.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/dnstt.service
     systemctl disable --now kok-dnstt.service kok-dnstt-fw.service >/dev/null 2>&1
     rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service
     systemctl daemon-reload 2>/dev/null
     dnstt_fw_del
+    dnstt_restore_resolved
     rm -rf "$DNSTT_DIR"
     rm -f "$DNSTT_BIN"
     log "DNSTT removed"
-    echo -e "${G}DNSTT removed.${N}"
+    echo -e "${G}DNSTT removed (systemd-resolved restored if it was stopped).${N}"
     press_enter
 }
 
 dnstt_menu() {
     while true; do
-        echo -e "${Y}--- DNSTT (SlowDNS) ---${N}"
+        echo -e "${M}--- 📡 DNSTT (DNS Tunnel) Management ---${N}"
         if [ -f "$DNSTT_DIR/domain.txt" ]; then
-            echo -e " Domain : ${G}$(cat "$DNSTT_DIR/domain.txt")${N}   Status: ${G}$(systemctl is-active kok-dnstt.service 2>/dev/null || echo unknown)${N}"
+            echo -e " Domain : ${G}$(cat "$DNSTT_DIR/domain.txt")${N}   Status: ${G}$(systemctl is-active dnstt.service 2>/dev/null || echo unknown)${N}"
         else
             echo -e " Status : ${R}not set up${N}"
         fi
         echo -e " ${W}[1]${N} Setup / Re-setup DNSTT"
-        echo -e " ${W}[2]${N} Show DNSTT Info (for customers)"
+        echo -e " ${W}[2]${N} View Connection Details"
         echo -e " ${W}[3]${N} Restart DNSTT"
         echo -e " ${W}[4]${N} Remove DNSTT"
         echo -e " ${W}[0]${N} Back"
@@ -937,53 +1011,55 @@ ssltunnel_uninstall() {
 
 # --- Websockets Proxy (falconproxy profiles) ---
 wsproxy_install() {
-    echo -e "${Y}--- Installing Websockets Proxy ---${N}"
-    echo -e "${C}Fetching available versions from GitHub...${N}"
+    echo -e "${M}--- 🦅 Installing Websockets Proxy ---${N}"
+    echo -e "${C}🌐 Fetching available versions from GitHub...${N}"
     echo
     echo "Select a version to install:"
     echo -e "  ${C}[ 1]${N} v1.2-RustFast"
     echo -e "  ${C}[ 2]${N} v1-vodafoneIE"
     echo -e "  ${C}[ 3]${N} v0-WebSockets"
-    echo -e "  ${C}[ 0]${N} Cancel"
-    local ver profile ports p
-    read -rp "Enter version number [1]: " ver; ver="${ver:-1}"
+    echo -e "  ${C}[ 0]${N} ↩️ Cancel"
+    local ver vername profile ports p
+    read -rp "👉 Enter version number [1]: " ver; ver="${ver:-1}"
     case "$ver" in
-        1) profile="rustfast" ;;
-        2) profile="vodafone" ;;
-        3) profile="v0" ;;
+        1) profile="rustfast"; vername="v1.2-RustFast" ;;
+        2) profile="vodafone"; vername="v1-vodafoneIE" ;;
+        3) profile="v0"; vername="v0-WebSockets" ;;
         0) echo "Cancelled."; press_enter; return ;;
         *) echo -e "${R}Invalid version.${N}"; press_enter; return ;;
     esac
-    read -rp "Enter port(s) for Websockets Proxy (e.g., 8080 or 8080 8888) [8080]: " ports; ports="${ports:-8080}"
+    read -rp "👉 Enter port(s) for Websockets Proxy (e.g., 8080 or 8080 8888) [8080]: " ports; ports="${ports:-8080}"
     for p in $ports; do
         if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
             echo -e "${R}Invalid port: $p${N}"; press_enter; return
         fi
-        echo -e "${C}Checking if port $p is available...${N}"
+        echo -e "${C}🔍 Checking if port $p is available...${N}"
         if port_busy "$p"; then
             echo -e "${R}Port $p is already in use - choose another.${N}"; press_enter; return
         fi
-        echo -e "${G}Port $p is free to use.${N}"
+        echo -e "${G}✅ Port $p is free to use.${N}"
     done
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
-        echo -e "${Y}UFW firewall is active - make sure the port(s) are allowed.${N}"
-    else
-        echo -e "${C}No active firewall (UFW or firewalld) detected. Assuming ports are open.${N}"
-    fi
-    echo -e "${C}Detecting system architecture...${N}"
-    echo -e "${C}Detected $(uname -m) architecture.${N}"
-    echo -e "${C}Downloading Websockets Proxy source and building falconproxy...${N}"
+    fw_note
+    echo -e "${C}⚙ Detecting system architecture...${N}"
+    local archlbl="amd64" archname="x86_64 (amd64)"
+    case "$(uname -m)" in aarch64|arm64) archlbl="arm64"; archname="aarch64 (arm64)";; esac
+    echo -e "${C}ℹ Detected $archname architecture.${N}"
+    echo -e "${C}📥 Downloading Websockets Proxy $vername (falconproxy)...${N}"
     mkdir -p /etc/falconproxy
-    local srcdir; srcdir="$(mktemp -d)"
-    curl -fsSL --max-time 60 "$KOK_RAW/wsproxy.go" -o "$srcdir/wsproxy.go" \
-        || { rm -rf "$srcdir"; echo -e "${R}Could not fetch the proxy source from GitHub.${N}"; press_enter; return; }
-    dnstt_install_go || { rm -rf "$srcdir"; echo -e "${R}Go is required to build the proxy.${N}"; press_enter; return; }
-    ( cd "$srcdir" && go build -o /usr/local/bin/falconproxy wsproxy.go ) >/dev/null 2>&1
-    rm -rf "$srcdir"
-    [ -x /usr/local/bin/falconproxy ] || { echo -e "${R}Build failed.${N}"; press_enter; return; }
+    curl -fsSL --max-time 120 "$DNSTT_REL/falconproxy-linux-$archlbl" -o /usr/local/bin/falconproxy 2>/dev/null && chmod +x /usr/local/bin/falconproxy
+    if [ ! -x /usr/local/bin/falconproxy ]; then
+        echo -e "${Y}Pre-compiled binary is not published yet - building from source instead (one-time)...${N}"
+        local srcdir; srcdir="$(mktemp -d)"
+        curl -fsSL --max-time 60 "$KOK_RAW/wsproxy.go" -o "$srcdir/wsproxy.go" \
+            || { rm -rf "$srcdir"; echo -e "${R}Could not fetch the proxy source from GitHub.${N}"; press_enter; return; }
+        dnstt_install_go || { rm -rf "$srcdir"; echo -e "${R}Go is required to build the proxy.${N}"; press_enter; return; }
+        ( cd "$srcdir" && go build -o /usr/local/bin/falconproxy wsproxy.go ) >/dev/null 2>&1
+        rm -rf "$srcdir"
+    fi
+    [ -x /usr/local/bin/falconproxy ] || { echo -e "${R}Install failed.${N}"; press_enter; return; }
     printf '%s' "$profile" > /etc/falconproxy/profile
     printf '%s' "$ports" > /etc/falconproxy/ports
-    echo -e "${C}Creating systemd service file...${N}"
+    echo -e "${C}📝 Creating systemd service file...${N}"
     cat > /etc/systemd/system/falconproxy.service <<EOF
 [Unit]
 Description=Falcon Websockets Proxy (KOK)
@@ -998,13 +1074,13 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-    echo -e "${C}Saving configuration...${N}"
+    echo -e "${C}💾 Saving configuration...${N}"
     systemctl daemon-reload 2>/dev/null
-    echo -e "${C}Enabling and starting Websockets Proxy service...${N}"
+    echo -e "${C}▶ Enabling and starting Websockets Proxy service...${N}"
     systemctl enable --now falconproxy.service >/dev/null 2>&1
     sleep 1
     if systemctl is-active --quiet falconproxy.service; then
-        echo -e "${G}SUCCESS: Websockets Proxy ($profile) is installed and active.${N}"
+        echo -e "${G}✅ SUCCESS: Websockets Proxy $vername is installed and active.${N}"
         echo -e "   Listening on port(s): ${G}$ports${N}  ->  SSH 127.0.0.1:$(ssh_port)"
         log "WSPROXY install profile=$profile ports=$ports"
     else echo -e "${R}Service did not start - check: systemctl status falconproxy${N}"; fi
@@ -1194,7 +1270,7 @@ protocol_manager() {
         t_badvpn="$(svc_tag badvpn-udpgw.service)"
         t_udp="$(svc_tag udp-custom.service)"
         if [ -f /etc/stunnel/kok.conf ]; then t_ssl="$(svc_tag stunnel4.service)"; else t_ssl="$(echo -e "${R}(Inactive)${N}")"; fi
-        t_dnstt="$(svc_tag kok-dnstt.service)"
+        t_dnstt="$(svc_tag dnstt.service)"
         t_ws="$(svc_tag falconproxy.service)"
         t_nginx="$(svc_tag nginx.service)"
         t_zivpn="$(svc_tag zivpn.service)"
@@ -1539,8 +1615,9 @@ uninstall() {
     if [ "$ans2" = "y" ] || [ "$ans2" = "Y" ]; then
         managed_users | while read -r u; do pkill -u "$u" 2>/dev/null; userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null; done
     fi
-    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service kok-dtproxy.service badvpn-udpgw.service udp-custom.service falconproxy.service zivpn.service >/dev/null 2>&1
-    rm -f /etc/systemd/system/badvpn-udpgw.service /etc/systemd/system/udp-custom.service /etc/systemd/system/falconproxy.service /etc/systemd/system/zivpn.service
+    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service kok-dtproxy.service badvpn-udpgw.service udp-custom.service falconproxy.service zivpn.service dnstt.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/badvpn-udpgw.service /etc/systemd/system/udp-custom.service /etc/systemd/system/falconproxy.service /etc/systemd/system/zivpn.service /etc/systemd/system/dnstt.service
+    dnstt_restore_resolved 2>/dev/null
     rm -f /usr/local/bin/badvpn-udpgw /usr/local/bin/falconproxy /usr/local/bin/zivpn /etc/stunnel/kok.conf /etc/stunnel/kok.pem /etc/stunnel/kok.key /etc/stunnel/kok.crt /etc/nginx/conf.d/kok-ws-proxy.conf
     rm -rf /root/udp /etc/zivpn /etc/falconproxy
     systemctl disable --now kok-dnstt.service kok-dnstt-fw.service kok-dtproxy.service >/dev/null 2>&1
