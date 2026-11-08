@@ -24,25 +24,28 @@ menu
 - Menu ကို အပိုင်း ၄ ခု (USER MANAGEMENT / VPN & PROTOCOLS / SYSTEM SETTINGS / DANGER ZONE) နဲ့ နှစ်ကော်လံ ပြတယ်
 - SSH အကောင့် ထုတ် / Trial / သက်တမ်းတိုး / ဖျက် / Lock / Unlock / Edit (password, ရက်, limit ပြင်) / စာရင်း / Generate Client Config
 - Online user ကြည့်၊ session ပိတ်ချ
-- Protocol Manager (OpenSSH / DNSTT / DT Proxy အခြေအနေ + ထိန်းချုပ်မှု), Traffic Monitor (Lite) + Speedtest
+- Protocol & Panel Management: badvpn (UDP 7300), udp-custom, SSL Tunnel (444), DNSTT (53), Websockets Proxy (version ရွေး), Nginx Proxy (80/443), ZiVPN (UDP 5667), X-UI Panel — install/uninstall + status
+- Traffic Monitor (Lite) + Speedtest
 - Block Torrent (Anti-P2P), SSH Banner, Auto-Reboot Task, Cleanup Expired, Backup/Restore, Uninstall [99]
 - သက်တမ်းကုန် အကောင့်တွေ နာရီတိုင်း အလိုအလျောက် ဖျက်ပေးတယ်
 - Multi-login limit ကို မိနစ်တိုင်း စစ်ပြီး ပိုနေတဲ့ connection တွေ ပိတ်ပေးတယ်
 
 ## DNSTT (SlowDNS)
 
-Menu ထဲက `[16] DNSTT (SlowDNS)`:
+Protocol Manager ထဲက `[7] Install/View DNSTT (Port 53)`:
 
-- **Setup** – Nameserver (tunnel domain) ထည့်၊ key ရွေး:
-  - Auto-generate, ဒါမှမဟုတ်
-  - **ကိုယ်ပိုင် Private Key** – ကိုယ်ကြိုက်တဲ့ ဂဏန်း/စာလုံး (0-9, a-f) အလုံး ၆၄ လုံး ထည့်လို့ရတယ်။
-    Public Key က အဲဒီ private key ကနေ တွက်ထွက်တာမို့ **ဆာဗာ ဘယ်နှလုံးတပ်တပ် private key တူရင် Public Key အမြဲ တူတူပဲ** — customer တွေကို key တစ်ခု တည်းပေးရုံပဲ။
-- Setup ပြီးရင် **DNS record ၂ ခု** ထည့်ရမယ် (menu က ဘာထည့်ရမလဲ ပြပေးတယ်):
-  1. `A` record: `ns.<မင်း domain>` → ဆာဗာ IP
-  2. `NS` record: `<tunnel domain>` → `ns.<မင်း domain>` (Cloudflare မှာ DNS only / grey cloud)
-- **Show Info** – customer တွေကို ပေးဖို့ Nameserver + Public Key ကို အသင့် ပြပေးတယ်
-- Restart / Remove လည်း menu ထဲမှာပဲ
-- dnstt-server ကို ပထမဆုံး setup မှာ အလိုအလျောက် build လုပ်တယ် (Go လိုတယ် — မရှိရင် အလိုအလျောက် တပ်ပေးတယ်)၊ UDP 53 ကို 5300 သို့ redirect လုပ်ပြီး systemd service အနေနဲ့ run တယ်
+- **Setup** – မူရင်း script ရဲ့ flow အတိုင်း:
+  1. Port 53 ကို လွှတ်ပေး (systemd-resolved ကို ရပ်)၊ port လွတ်/မလွတ် စစ်
+  2. Forward ရွေး: `[1]` SSH (local SSH port) / `[2]` V2Ray backend (port 8787)
+  3. DNS records: `auto` (parent domain ထည့်ရုံနဲ့ nameserver + tunnel domain auto ထုတ်) / `custom` (nameserver domain + tunnel domain ကိုယ်တိုင် ထည့်)
+  4. MTU ထည့် (သို့) Enter = default
+  5. Key အသစ် auto ထုတ် (`server.key` / `server.pub`)၊ `dnstt` systemd service အနေနဲ့ UDP **53 တိုက်ရိုက်** run
+- Setup ပြီးရင် **DNSTT Connection Details** ပြပေးတယ် (Tunnel Domain / Public Key / Forwarding To / NS Record) — customer တွေကို ဒါပဲ ပေးရုံပဲ
+- တစ်ခါထည့်ရမယ့် **DNS record ၂ ခု** ကိုလည်း ပြပေးတယ် (Cloudflare မှာ DNS only / grey cloud):
+  1. `A` record: `<nameserver domain>` → ဆာဗာ IP
+  2. `NS` record: `<tunnel domain>` → `<nameserver domain>`
+- **View** – Connection Details ပြန်ပြ၊ **Uninstall** – service ဖျက် + systemd-resolved ပြန်ဖွင့်
+- dnstt-server binary ကို GitHub release ကနေ pre-compiled ဆွဲချ (မရှိသေးရင် source ကနေ တစ်ခါ build)
 
 ## Serial Key အသစ် ထုတ်နည်း (ပိုင်ရှင်အတွက်)
 
