@@ -398,6 +398,261 @@ restore_accounts() {
     press_enter
 }
 
+# ---------- DNSTT (SlowDNS) ----------
+DNSTT_DIR="$CONF_DIR/dnstt"
+DNSTT_BIN="/usr/local/bin/dnstt-server"
+
+dnstt_derive_pub() {
+    # X25519 public key (hex) for a 64-hex-char private key, via openssl.
+    local hex="$1" der pub i
+    command -v openssl >/dev/null 2>&1 || return 1
+    der="$(mktemp)"
+    { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x6e\x04\x22\x04\x20'
+      for ((i=0;i<64;i+=2)); do printf "\x${hex:i:2}"; done } > "$der"
+    openssl pkey -in "$der" -inform DER -pubout -outform DER -out "$der.pub" 2>/dev/null \
+        || { rm -f "$der" "$der.pub"; return 1; }
+    pub="$(tail -c 32 "$der.pub" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    rm -f "$der" "$der.pub"
+    [[ "$pub" =~ ^[0-9a-f]{64}$ ]] && { echo "$pub"; return 0; }
+    return 1
+}
+
+dnstt_pub_from_run() {
+    # fallback: start the server briefly with a privkey file and read the pubkey it logs
+    [ -x "$DNSTT_BIN" ] || return 1
+    timeout 2 "$DNSTT_BIN" -udp 127.0.0.1:15399 -privkey-file "$1" probe.invalid 127.0.0.1:22 2>&1 \
+        | grep -o 'pubkey [0-9a-f]\{64\}' | awk '{print $2}' | head -1
+}
+
+dnstt_install_go() {
+    export PATH="$PATH:/usr/local/go/bin"
+    command -v go >/dev/null 2>&1 && return 0
+    echo "Installing Go (needed once to build dnstt-server)..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq golang-go git >/dev/null 2>&1
+    fi
+    command -v go >/dev/null 2>&1 && return 0
+    local arch tb
+    case "$(uname -m)" in x86_64) arch="amd64";; aarch64|arm64) arch="arm64";; *) arch="amd64";; esac
+    tb="$(mktemp -d)/go.tar.gz"
+    curl -fsSL --max-time 300 "https://go.dev/dl/go1.22.12.linux-$arch.tar.gz" -o "$tb" 2>/dev/null \
+        || curl -fsSL --max-time 300 "https://dl.google.com/go/go1.22.12.linux-$arch.tar.gz" -o "$tb" 2>/dev/null \
+        || return 1
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "$tb" 2>/dev/null || return 1
+    ln -sf /usr/local/go/bin/go /usr/local/bin/go 2>/dev/null
+    export PATH="$PATH:/usr/local/go/bin"
+    command -v go >/dev/null 2>&1
+}
+
+dnstt_ensure_binary() {
+    [ -x "$DNSTT_BIN" ] && return 0
+    echo -e "${Y}Building dnstt-server (one-time, may take a few minutes)...${N}"
+    if command -v apt-get >/dev/null 2>&1 && ! command -v git >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq git >/dev/null 2>&1
+    fi
+    dnstt_install_go || { echo -e "${R}Could not install Go. Check the network and try again.${N}"; return 1; }
+    local tmp; tmp="$(mktemp -d)"
+    git clone -q --depth 1 https://github.com/Mygod/dnstt.git "$tmp/dnstt" 2>/dev/null \
+        || git clone -q --depth 1 https://github.com/gharib-uk/dnstt "$tmp/dnstt" 2>/dev/null \
+        || { rm -rf "$tmp"; echo -e "${R}Could not download the dnstt source.${N}"; return 1; }
+    ( cd "$tmp/dnstt/dnstt-server" && go build -o "$DNSTT_BIN" . ) >/dev/null 2>&1
+    rm -rf "$tmp"
+    [ -x "$DNSTT_BIN" ] || { echo -e "${R}dnstt-server build failed.${N}"; return 1; }
+    echo -e "${G}dnstt-server ready.${N}"
+    return 0
+}
+
+dnstt_fw_add() {
+    iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null \
+        || iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
+    ip6tables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null \
+        || ip6tables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
+    return 0
+}
+
+dnstt_fw_del() {
+    while iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null; do
+        iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
+    done
+    while ip6tables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null; do
+        ip6tables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null
+    done
+    return 0
+}
+
+dnstt_write_units() {
+    local domain="$1"
+    cat > /etc/systemd/system/kok-dnstt.service <<EOF
+[Unit]
+Description=KOK DNSTT (SlowDNS) server
+After=network.target kok-dnstt-fw.service
+Wants=kok-dnstt-fw.service
+
+[Service]
+ExecStart=$DNSTT_BIN -udp :5300 -privkey-file $DNSTT_DIR/server.key $domain 127.0.0.1:$(ssh_port)
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat > /etc/systemd/system/kok-dnstt-fw.service <<'EOF'
+[Unit]
+Description=KOK DNSTT UDP 53 redirect to 5300
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300'
+ExecStart=/bin/sh -c 'ip6tables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || ip6tables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300; true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable kok-dnstt-fw.service kok-dnstt.service >/dev/null 2>&1
+}
+
+dnstt_dns_help() {
+    local domain="$1" parent nshost
+    parent="$(echo "$domain" | cut -d. -f2-)"
+    nshost="ns.$parent"
+    echo -e "${Y}DNS records to add ONE TIME in your domain panel (Cloudflare: DNS only / grey cloud):${N}"
+    echo -e "   1) Type ${W}A${N}    Name ${W}$nshost${N}        ->  ${W}$(pub_ip)${N}"
+    echo -e "   2) Type ${W}NS${N}   Name ${W}$domain${N}   ->  ${W}$nshost${N}"
+    echo -e " ${W}(Without these 2 records the tunnel cannot work.)${N}"
+}
+
+dnstt_setup() {
+    echo -e "${Y}--- DNSTT (SlowDNS) SETUP ---${N}"
+    mkdir -p "$DNSTT_DIR"; chmod 700 "$DNSTT_DIR"
+    local domain priv pub choice seed tries
+    read -rp "Nameserver / tunnel domain (e.g. t.yourdomain.com): " domain
+    domain="$(printf '%s' "$domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
+    if ! [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$domain" != *.* ]]; then
+        echo -e "${R}Invalid domain.${N}"; press_enter; return
+    fi
+    echo "Key choice:"
+    echo "  [1] Auto-generate a new key"
+    echo "  [2] Use MY OWN private key (favourite numbers -> your public key is derived from it)"
+    read -rp " Choose [1]: " choice; choice="${choice:-1}"
+    if [ "$choice" = "2" ]; then
+        echo -e "${W}Your private key = exactly 64 characters: digits 0-9 and letters a-f only.${N}"
+        echo -e "${W}Example: your favourite numbers repeated, like 241120241120... (64 chars).${N}"
+        echo -e "${W}Same private key on any server always gives the SAME public key for your customers.${N}"
+        tries=0
+        while [ $tries -lt 3 ]; do
+            read -rp "Enter your 64-char private key (ENTER = cancel): " seed
+            seed="$(printf '%s' "$seed" | tr -d ' ' | tr 'A-Z' 'a-z')"
+            [ -z "$seed" ] && { echo "Cancelled."; press_enter; return; }
+            [[ "$seed" =~ ^[0-9a-f]{64}$ ]] && break
+            echo -e "${R}Not valid: must be exactly 64 chars of 0-9 / a-f (yours: ${#seed} chars).${N}"
+            tries=$((tries+1)); seed=""
+        done
+        [ -z "$seed" ] && { echo -e "${R}Cancelled after 3 tries.${N}"; press_enter; return; }
+        priv="$seed"
+    else
+        priv="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+    fi
+    pub="$(dnstt_derive_pub "$priv")"
+    printf '%s' "$priv" > "$DNSTT_DIR/server.key"; chmod 600 "$DNSTT_DIR/server.key"
+    if [ -z "$pub" ]; then pub="$(dnstt_pub_from_run "$DNSTT_DIR/server.key")"; fi
+    if [ -z "$pub" ]; then
+        echo -e "${R}Could not derive the public key (openssl missing?). Setup stopped.${N}"
+        press_enter; return
+    fi
+    printf '%s' "$pub" > "$DNSTT_DIR/server.pub"; chmod 644 "$DNSTT_DIR/server.pub"
+    printf '%s' "$domain" > "$DNSTT_DIR/domain.txt"
+    dnstt_ensure_binary || { echo -e "${R}Keys saved, but dnstt-server is not installed yet. Run setup again when the network is OK.${N}"; press_enter; return; }
+    dnstt_write_units "$domain"
+    dnstt_fw_add
+    systemctl restart kok-dnstt.service 2>/dev/null
+    sleep 1
+    log "DNSTT setup domain=$domain"
+    echo
+    if systemctl is-active --quiet kok-dnstt.service 2>/dev/null; then
+        echo -e "${G}DNSTT is RUNNING.${N}"
+    else
+        echo -e "${Y}DNSTT service state could not be confirmed here - check: systemctl status kok-dnstt${N}"
+    fi
+    echo -e "${C}----------------------------------------${N}"
+    echo -e "${W}        DNSTT (SlowDNS) DETAILS${N}"
+    echo -e "${C}----------------------------------------${N}"
+    echo -e " Nameserver : ${G}$domain${N}"
+    echo -e " Public Key : ${G}$pub${N}"
+    echo -e " Server IP  : ${G}$(pub_ip)${N}"
+    echo -e " SSH Port   : ${G}$(ssh_port)${N}"
+    echo -e "${C}----------------------------------------${N}"
+    dnstt_dns_help "$domain"
+    press_enter
+}
+
+dnstt_info() {
+    echo -e "${Y}--- DNSTT INFO ---${N}"
+    if [ ! -f "$DNSTT_DIR/domain.txt" ]; then echo "DNSTT is not set up yet. Use Setup first."; press_enter; return; fi
+    local domain pub st
+    domain="$(cat "$DNSTT_DIR/domain.txt")"; pub="$(cat "$DNSTT_DIR/server.pub" 2>/dev/null)"
+    st="$(systemctl is-active kok-dnstt.service 2>/dev/null || echo unknown)"
+    echo -e " Status     : ${G}$st${N}"
+    echo -e " Nameserver : ${G}$domain${N}"
+    echo -e " Public Key : ${G}$pub${N}"
+    echo -e " Server IP  : ${G}$(pub_ip)${N}"
+    echo -e " SSH Port   : ${G}$(ssh_port)${N}"
+    echo
+    echo -e "${W}Give your customers exactly these two in their SlowDNS / NPV Tunnel app:${N}"
+    echo -e "   Nameserver : $domain"
+    echo -e "   Public Key : $pub"
+    press_enter
+}
+
+dnstt_restart() {
+    systemctl restart kok-dnstt.service 2>/dev/null && echo -e "${G}DNSTT restarted.${N}" || echo -e "${R}Restart failed (not set up?).${N}"
+    press_enter
+}
+
+dnstt_remove() {
+    read -rp "Remove DNSTT completely? [y/N]: " ans
+    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Cancelled."; press_enter; return; }
+    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service
+    systemctl daemon-reload 2>/dev/null
+    dnstt_fw_del
+    rm -rf "$DNSTT_DIR"
+    rm -f "$DNSTT_BIN"
+    log "DNSTT removed"
+    echo -e "${G}DNSTT removed.${N}"
+    press_enter
+}
+
+dnstt_menu() {
+    while true; do
+        echo -e "${Y}--- DNSTT (SlowDNS) ---${N}"
+        if [ -f "$DNSTT_DIR/domain.txt" ]; then
+            echo -e " Domain : ${G}$(cat "$DNSTT_DIR/domain.txt")${N}   Status: ${G}$(systemctl is-active kok-dnstt.service 2>/dev/null || echo unknown)${N}"
+        else
+            echo -e " Status : ${R}not set up${N}"
+        fi
+        echo -e " ${W}[1]${N} Setup / Re-setup DNSTT"
+        echo -e " ${W}[2]${N} Show DNSTT Info (for customers)"
+        echo -e " ${W}[3]${N} Restart DNSTT"
+        echo -e " ${W}[4]${N} Remove DNSTT"
+        echo -e " ${W}[0]${N} Back"
+        read -rp " Choose: " dc
+        case "$dc" in
+            1) dnstt_setup ;;
+            2) dnstt_info ;;
+            3) dnstt_restart ;;
+            4) dnstt_remove ;;
+            0) return ;;
+            *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
+        esac
+    done
+}
+
 reboot_server() {
     read -rp "Reboot the server now? [y/N]: " ans
     if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then echo "Rebooting..."; sleep 1; reboot; fi
@@ -412,6 +667,9 @@ uninstall() {
     if [ "$ans2" = "y" ] || [ "$ans2" = "Y" ]; then
         managed_users | while read -r u; do pkill -u "$u" 2>/dev/null; userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null; done
     fi
+    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service /usr/local/bin/dnstt-server
+    dnstt_fw_del 2>/dev/null
     rm -f /etc/cron.d/kok-manager /usr/local/bin/menu /usr/local/bin/kok-genkey
     rm -rf "$BASE_DIR" "$CONF_DIR"
     echo -e "${G}KOK SSH Manager removed. Goodbye!${N}"
@@ -439,6 +697,7 @@ while true; do
     echo -e " ${W}[13]${N} Restore Accounts"
     echo -e " ${W}[14]${N} Reboot Server"
     echo -e " ${W}[15]${N} Uninstall Manager"
+    echo -e " ${W}[16]${N} DNSTT (SlowDNS)"
     echo -e " ${W}[0]${N}  Exit"
     echo -e "${C}------------------------------------------------------------${N}"
     read -rp " Choose: " choice
@@ -458,6 +717,7 @@ while true; do
         13) restore_accounts ;;
         14) reboot_server ;;
         15) uninstall ;;
+        16) dnstt_menu ;;
         0) echo "Bye!"; exit 0 ;;
         *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
     esac
