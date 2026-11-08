@@ -22,13 +22,14 @@ menu
 ```
 
 - Menu ကို အပိုင်း ၄ ခု (USER MANAGEMENT / VPN & PROTOCOLS / SYSTEM SETTINGS / DANGER ZONE) နဲ့ နှစ်ကော်လံ ပြတယ်
-- SSH အကောင့် ထုတ် / Trial / သက်တမ်းတိုး / ဖျက် / Lock / Unlock / Edit (password, ရက်, limit ပြင်) / စာရင်း / Generate Client Config
+- SSH အကောင့် ထုတ် (username + password (Enter = auto) + days + connection limit + **bandwidth limit GB**, ပြီးရင် client config တန်း ထုတ်ပေး) / သက်တမ်းတိုး / ဖျက် / Lock / Unlock / Edit (password, ရက်, limit, bandwidth ပြင်) / စာရင်း (Bandwidth used ကော်လံ ပါ) / Generate Client Config
 - Online user ကြည့်၊ session ပိတ်ချ
 - Protocol & Panel Management: badvpn (UDP 7300), udp-custom, SSL Tunnel (444), DNSTT (53), Websockets Proxy (version ရွေး), Nginx Proxy (80/443), ZiVPN (UDP 5667), X-UI Panel — install/uninstall + status
 - Traffic Monitor (Lite) + Speedtest
 - Block Torrent (Anti-P2P), SSH Banner, Auto-Reboot Task, Cleanup Expired, Backup/Restore, Uninstall [99]
 - သက်တမ်းကုန် အကောင့်တွေ နာရီတိုင်း အလိုအလျောက် ဖျက်ပေးတယ်
 - Multi-login limit ကို မိနစ်တိုင်း စစ်ပြီး ပိုနေတဲ့ connection တွေ ပိတ်ပေးတယ်
+- **Bandwidth (GB) limit**: အကောင့် တစ်ခုချင်း traffic ကို iptables owner-match counter နဲ့ တိုင်းတယ် — quota ပြည့်ရင် အကောင့် lock + session ပိတ် (`BW-LOCK`), Edit မှာ quota တိုးပေး/0 လုပ်ရင် ၁ မိနစ်အတွင်း auto unlock (`BW-UNLOCK`)။ သုံးပြီးသား ပမာဏ `/etc/kok-manager/bw.state` မှာ သိမ်းလို့ reboot ကြောင့် မပျက်ဘူး
 
 ## DNSTT (SlowDNS)
 
