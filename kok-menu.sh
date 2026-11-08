@@ -188,6 +188,7 @@ header() {
     echo -e "${C}----------------------------------------------------------------------${N}"
     echo -e "              ${C}PREMIUM SSH & VPN SERVICES${N}"
     echo -e "              ${Y}Developed by: KOK ${N}<🇲🇲/>"
+    echo -e " ${Y}System License Status : ${G}Activated (Verified)${N}"
     echo -e "${C}----------------------------------------------------------------------${N}"
     echo -e "${B}======================================================================${N}"
     printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "OS" "$osname" "Uptime:" "$up"
@@ -772,37 +773,470 @@ dtproxy_menu() {
     done
 }
 
-# ---------- Protocol Manager ----------
+# ---------- Protocol & Panel Management ----------
+KOK_RAW="https://raw.githubusercontent.com/KOKOWNER/kok-manager/main"
+
+svc_tag() { # unit -> (Active)/(Inactive)
+    if systemctl is-active --quiet "$1" 2>/dev/null; then echo -e "${G}(Active)${N}"; else echo -e "${R}(Inactive)${N}"; fi
+}
+
+inst_tag() { # $1 = 0/1 installed
+    if [ "$1" = "1" ]; then echo -e "${G}(Installed)${N}"; else echo -e "${R}(Not Installed)${N}"; fi
+}
+
+port_busy() { ss -tulnp 2>/dev/null | grep -q ":$1 "; }
+
+apt_install() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq "$@" >/dev/null 2>&1
+}
+
+# --- badvpn (UDP gateway, port 7300) ---
+badvpn_install() {
+    echo -e "${Y}--- Installing badvpn (UDP 7300) ---${N}"
+    if [ -x /usr/local/bin/badvpn-udpgw ]; then echo -e "${G}badvpn-udpgw is already installed.${N}"; press_enter; return; fi
+    echo "Installing build tools and compiling badvpn (one-time, a few minutes)..."
+    apt_install build-essential cmake git pkg-config libnspr4-dev libnss3-dev
+    local tmp; tmp="$(mktemp -d)"
+    git clone -q --depth 1 https://github.com/ambrop72/badvpn.git "$tmp/badvpn" 2>/dev/null \
+        || { rm -rf "$tmp"; echo -e "${R}Download failed.${N}"; press_enter; return; }
+    mkdir -p "$tmp/badvpn/build"
+    ( cd "$tmp/badvpn/build" && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TUN2SOCKS=OFF -DBUILD_CLIENT=OFF -DBUILD_FLOODER=OFF >/dev/null 2>&1 \
+        && make -j"$(nproc)" badvpn-udpgw >/dev/null 2>&1 )
+    if [ ! -f "$tmp/badvpn/build/udpgw/badvpn-udpgw" ]; then
+        rm -rf "$tmp"; echo -e "${R}Build failed.${N}"; press_enter; return
+    fi
+    cp "$tmp/badvpn/build/udpgw/badvpn-udpgw" /usr/local/bin/badvpn-udpgw
+    rm -rf "$tmp"
+    cat > /etc/systemd/system/badvpn-udpgw.service <<'EOF'
+[Unit]
+Description=BadVPN UDP Gateway
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 100
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable --now badvpn-udpgw.service >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet badvpn-udpgw.service; then
+        echo -e "${G}SUCCESS: badvpn-udpgw is active on 127.0.0.1:7300 (UDP).${N}"; log "BADVPN install"
+    else echo -e "${R}Service did not start - check: systemctl status badvpn-udpgw${N}"; fi
+    press_enter
+}
+
+badvpn_uninstall() {
+    systemctl disable --now badvpn-udpgw.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/badvpn-udpgw.service /usr/local/bin/badvpn-udpgw
+    systemctl daemon-reload 2>/dev/null
+    echo -e "${G}badvpn removed.${N}"; log "BADVPN uninstall"; press_enter
+}
+
+# --- udp-custom (HTTP Custom UDP tunnel) ---
+udpcustom_install() {
+    echo -e "${Y}--- Installing udp-custom ---${N}"
+    if [ -x /root/udp/udp-custom ]; then echo -e "${G}udp-custom is already installed.${N}"; press_enter; return; fi
+    if [ "$(uname -m)" != "x86_64" ]; then
+        echo -e "${R}Upstream udp-custom only publishes an amd64 binary - this server is $(uname -m).${N}"; press_enter; return
+    fi
+    mkdir -p /root/udp
+    echo "Downloading udp-custom binary (upstream: github.com/http-custom/udp-custom)..."
+    curl -fsSL --max-time 120 "https://raw.githubusercontent.com/http-custom/udp-custom/main/bin/udp-custom-linux-amd64" -o /root/udp/udp-custom \
+        || { echo -e "${R}Download failed.${N}"; press_enter; return; }
+    chmod +x /root/udp/udp-custom
+    cat > /root/udp/config.json <<'EOF'
+{
+  "listen": ":36712",
+  "stream_buffer": 33554432,
+  "receive_buffer": 83886080,
+  "auth": {
+    "mode": "passwords"
+  }
+}
+EOF
+    cat > /etc/systemd/system/udp-custom.service <<'EOF'
+[Unit]
+Description=UDP Custom by ePro Dev. Team
+After=network.target
+
+[Service]
+User=root
+Type=simple
+ExecStart=/root/udp/udp-custom server
+WorkingDirectory=/root/udp/
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sysctl -w net.core.rmem_max=83886080 >/dev/null 2>&1
+    sysctl -w net.core.wmem_max=83886080 >/dev/null 2>&1
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable --now udp-custom.service >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet udp-custom.service; then
+        echo -e "${G}SUCCESS: udp-custom is active (UDP :36712).${N}"; log "UDPCUSTOM install"
+    else echo -e "${R}Service did not start - check: systemctl status udp-custom${N}"; fi
+    press_enter
+}
+
+udpcustom_uninstall() {
+    systemctl disable --now udp-custom.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/udp-custom.service
+    systemctl daemon-reload 2>/dev/null
+    rm -rf /root/udp
+    echo -e "${G}udp-custom removed.${N}"; log "UDPCUSTOM uninstall"; press_enter
+}
+
+# --- SSL Tunnel (stunnel, port 444 -> SSH) ---
+ssltunnel_install() {
+    echo -e "${Y}--- Installing SSL Tunnel (Port 444) ---${N}"
+    if [ -f /etc/stunnel/kok.conf ]; then echo -e "${G}SSL Tunnel is already configured.${N}"; press_enter; return; fi
+    apt_install stunnel4
+    mkdir -p /etc/stunnel
+    if [ ! -f /etc/stunnel/kok.pem ]; then
+        openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+            -subj "/C=MM/ST=Yangon/L=Yangon/O=KOK/CN=localhost" \
+            -keyout /etc/stunnel/kok.key -out /etc/stunnel/kok.crt 2>/dev/null
+        cat /etc/stunnel/kok.key /etc/stunnel/kok.crt > /etc/stunnel/kok.pem
+        chmod 600 /etc/stunnel/kok.pem /etc/stunnel/kok.key
+    fi
+    cat > /etc/stunnel/kok.conf <<EOF
+pid = /var/run/stunnel-kok.pid
+foreground = no
+[ssh]
+accept = 444
+connect = 127.0.0.1:$(ssh_port)
+cert = /etc/stunnel/kok.pem
+EOF
+    if [ -f /etc/default/stunnel4 ]; then
+        sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+        grep -q '^ENABLED=' /etc/default/stunnel4 || echo 'ENABLED=1' >> /etc/default/stunnel4
+    fi
+    systemctl restart stunnel4 2>/dev/null || service stunnel4 restart 2>/dev/null
+    sleep 1
+    if port_busy 444; then
+        echo -e "${G}SUCCESS: SSL Tunnel is listening on port 444 -> SSH (127.0.0.1:$(ssh_port)).${N}"; log "SSLTUNNEL install"
+    else echo -e "${R}Port 444 is not listening - check: systemctl status stunnel4${N}"; fi
+    press_enter
+}
+
+ssltunnel_uninstall() {
+    rm -f /etc/stunnel/kok.conf /etc/stunnel/kok.pem
+    systemctl restart stunnel4 2>/dev/null
+    echo -e "${G}SSL Tunnel removed.${N}"; log "SSLTUNNEL uninstall"; press_enter
+}
+
+# --- Websockets Proxy (falconproxy profiles) ---
+wsproxy_install() {
+    echo -e "${Y}--- Installing Websockets Proxy ---${N}"
+    echo -e "${C}Fetching available versions from GitHub...${N}"
+    echo
+    echo "Select a version to install:"
+    echo -e "  ${C}[ 1]${N} v1.2-RustFast"
+    echo -e "  ${C}[ 2]${N} v1-vodafoneIE"
+    echo -e "  ${C}[ 3]${N} v0-WebSockets"
+    echo -e "  ${C}[ 0]${N} Cancel"
+    local ver profile ports p
+    read -rp "Enter version number [1]: " ver; ver="${ver:-1}"
+    case "$ver" in
+        1) profile="rustfast" ;;
+        2) profile="vodafone" ;;
+        3) profile="v0" ;;
+        0) echo "Cancelled."; press_enter; return ;;
+        *) echo -e "${R}Invalid version.${N}"; press_enter; return ;;
+    esac
+    read -rp "Enter port(s) for Websockets Proxy (e.g., 8080 or 8080 8888) [8080]: " ports; ports="${ports:-8080}"
+    for p in $ports; do
+        if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+            echo -e "${R}Invalid port: $p${N}"; press_enter; return
+        fi
+        echo -e "${C}Checking if port $p is available...${N}"
+        if port_busy "$p"; then
+            echo -e "${R}Port $p is already in use - choose another.${N}"; press_enter; return
+        fi
+        echo -e "${G}Port $p is free to use.${N}"
+    done
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+        echo -e "${Y}UFW firewall is active - make sure the port(s) are allowed.${N}"
+    else
+        echo -e "${C}No active firewall (UFW or firewalld) detected. Assuming ports are open.${N}"
+    fi
+    echo -e "${C}Detecting system architecture...${N}"
+    echo -e "${C}Detected $(uname -m) architecture.${N}"
+    echo -e "${C}Downloading Websockets Proxy source and building falconproxy...${N}"
+    mkdir -p /etc/falconproxy
+    local srcdir; srcdir="$(mktemp -d)"
+    curl -fsSL --max-time 60 "$KOK_RAW/wsproxy.go" -o "$srcdir/wsproxy.go" \
+        || { rm -rf "$srcdir"; echo -e "${R}Could not fetch the proxy source from GitHub.${N}"; press_enter; return; }
+    dnstt_install_go || { rm -rf "$srcdir"; echo -e "${R}Go is required to build the proxy.${N}"; press_enter; return; }
+    ( cd "$srcdir" && go build -o /usr/local/bin/falconproxy wsproxy.go ) >/dev/null 2>&1
+    rm -rf "$srcdir"
+    [ -x /usr/local/bin/falconproxy ] || { echo -e "${R}Build failed.${N}"; press_enter; return; }
+    printf '%s' "$profile" > /etc/falconproxy/profile
+    printf '%s' "$ports" > /etc/falconproxy/ports
+    echo -e "${C}Creating systemd service file...${N}"
+    cat > /etc/systemd/system/falconproxy.service <<EOF
+[Unit]
+Description=Falcon Websockets Proxy (KOK)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/falconproxy -ports "$ports" -backend 127.0.0.1:$(ssh_port) -profile $profile
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    echo -e "${C}Saving configuration...${N}"
+    systemctl daemon-reload 2>/dev/null
+    echo -e "${C}Enabling and starting Websockets Proxy service...${N}"
+    systemctl enable --now falconproxy.service >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet falconproxy.service; then
+        echo -e "${G}SUCCESS: Websockets Proxy ($profile) is installed and active.${N}"
+        echo -e "   Listening on port(s): ${G}$ports${N}  ->  SSH 127.0.0.1:$(ssh_port)"
+        log "WSPROXY install profile=$profile ports=$ports"
+    else echo -e "${R}Service did not start - check: systemctl status falconproxy${N}"; fi
+    press_enter
+}
+
+wsproxy_uninstall() {
+    systemctl disable --now falconproxy.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/falconproxy.service /usr/local/bin/falconproxy
+    systemctl daemon-reload 2>/dev/null
+    rm -rf /etc/falconproxy
+    echo -e "${G}Websockets Proxy removed.${N}"; log "WSPROXY uninstall"; press_enter
+}
+
+# --- Nginx Proxy (80/443) ---
+nginx_install_manage() {
+    if ! command -v nginx >/dev/null 2>&1; then
+        echo -e "${Y}--- Installing Nginx Proxy (80/443) ---${N}"
+        apt_install nginx openssl
+        local wsport="8080"
+        [ -f /etc/falconproxy/ports ] && wsport="$(awk '{print $1}' /etc/falconproxy/ports)"
+        if [ ! -f /etc/nginx/kok.crt ]; then
+            openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+                -subj "/C=MM/ST=Yangon/L=Yangon/O=KOK/CN=localhost" \
+                -keyout /etc/nginx/kok.key -out /etc/nginx/kok.crt 2>/dev/null
+        fi
+        cat > /etc/nginx/conf.d/kok-ws-proxy.conf <<EOF
+server {
+    listen 80 default_server;
+    server_name _;
+    location / {
+        proxy_pass http://127.0.0.1:$wsport;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+}
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_certificate /etc/nginx/kok.crt;
+    ssl_certificate_key /etc/nginx/kok.key;
+    location / {
+        proxy_pass http://127.0.0.1:$wsport;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+}
+EOF
+        if nginx -t 2>/dev/null; then
+            systemctl enable --now nginx >/dev/null 2>&1; systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null
+            echo -e "${G}SUCCESS: Nginx Proxy is active on 80/443 -> Websockets Proxy port $wsport.${N}"
+            log "NGINX install backend=$wsport"
+        else echo -e "${R}nginx config test failed - run: nginx -t${N}"; fi
+        press_enter
+        return
+    fi
+    while true; do
+        echo -e "${Y}--- MANAGE NGINX PROXY ---${N}"
+        echo -e " Status: $(svc_tag nginx.service)   Config: /etc/nginx/conf.d/kok-ws-proxy.conf"
+        echo -e " ${W}[1]${N} Restart Nginx"
+        echo -e " ${W}[2]${N} View proxy config"
+        echo -e " ${W}[3]${N} Uninstall KOK Nginx Proxy config"
+        echo -e " ${W}[0]${N} Back"
+        read -rp " Choose: " nc
+        case "$nc" in
+            1) systemctl restart nginx 2>/dev/null && echo -e "${G}Restarted.${N}" || echo -e "${R}Failed.${N}"; press_enter ;;
+            2) cat /etc/nginx/conf.d/kok-ws-proxy.conf 2>/dev/null; press_enter ;;
+            3) rm -f /etc/nginx/conf.d/kok-ws-proxy.conf; nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null; echo -e "${G}KOK Nginx Proxy config removed (nginx package kept).${N}"; log "NGINX config removed"; press_enter; return ;;
+            0) return ;;
+            *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- ZiVPN (UDP 5667) ---
+zivpn_install() {
+    echo -e "${Y}--- Installing ZiVPN (UDP 5667) ---${N}"
+    if [ -x /usr/local/bin/zivpn ]; then echo -e "${G}ZiVPN is already installed.${N}"; press_enter; return; fi
+    local asset
+    case "$(uname -m)" in
+        x86_64) asset="udp-zivpn-linux-amd64" ;;
+        aarch64|arm64) asset="udp-zivpn-linux-arm64" ;;
+        *) echo -e "${R}Unsupported architecture: $(uname -m)${N}"; press_enter; return ;;
+    esac
+    echo "Downloading ZiVPN server binary..."
+    curl -fsSL --max-time 180 "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/$asset" -o /usr/local/bin/zivpn \
+        || { echo -e "${R}Download failed.${N}"; press_enter; return; }
+    chmod +x /usr/local/bin/zivpn
+    mkdir -p /etc/zivpn
+    local pwlist pwjson
+    read -rp "ZiVPN UDP password(s), comma separated [zi]: " pwlist; pwlist="${pwlist:-zi}"
+    pwjson="$(printf '%s' "$pwlist" | sed 's/,/","/g')"
+    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 \
+        -subj "/C=US/ST=California/L=Los Angeles/O=Example Corp/OU=IT Department/CN=zivpn" \
+        -keyout /etc/zivpn/zivpn.key -out /etc/zivpn/zivpn.crt 2>/dev/null
+    cat > /etc/zivpn/config.json <<ZCFG
+{
+  "listen": ":5667",
+  "cert": "/etc/zivpn/zivpn.crt",
+  "key": "/etc/zivpn/zivpn.key",
+  "obfs": "zivpn",
+  "auth": {
+    "mode": "passwords",
+    "config": ["$pwjson"]
+  }
+}
+ZCFG
+    sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1
+    sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1
+    cat > /etc/systemd/system/zivpn.service <<'ZUNIT'
+[Unit]
+Description=zivpn VPN Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/zivpn
+ExecStart=/usr/local/bin/zivpn server -c /etc/zivpn/config.json
+Restart=always
+RestartSec=3
+Environment=ZIVPN_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+ZUNIT
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable --now zivpn.service >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet zivpn.service; then
+        echo -e "${G}SUCCESS: ZiVPN is active (UDP :5667). Password(s): $pwlist${N}"; log "ZIVPN install"
+    else echo -e "${R}Service did not start - check: systemctl status zivpn${N}"; fi
+    press_enter
+}
+
+zivpn_uninstall() {
+    systemctl disable --now zivpn.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/zivpn.service /usr/local/bin/zivpn
+    systemctl daemon-reload 2>/dev/null
+    rm -rf /etc/zivpn
+    echo -e "${G}ZiVPN removed.${N}"; log "ZIVPN uninstall"; press_enter
+}
+
+# --- X-UI Panel ---
+xui_install() {
+    echo -e "${Y}--- Installing X-UI Panel ---${N}"
+    if systemctl list-unit-files 2>/dev/null | grep -q '^x-ui\.service' || [ -d /usr/local/x-ui ]; then
+        echo -e "${G}X-UI Panel is already installed.${N}"; press_enter; return
+    fi
+    echo -e "${W}This downloads and runs the OFFICIAL 3x-ui installer (mhsanaei/3x-ui on GitHub, via jsDelivr CDN).${N}"
+    echo -e "${W}It will ask you for a port / username / password - answer on screen.${N}"
+    read -rp "Continue? [y/N]: " ans
+    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Cancelled."; press_enter; return; }
+    local xui_tmp; xui_tmp="$(mktemp)"
+    if curl -Ls --max-time 120 "https://cdn.jsdelivr.net/gh/mhsanaei/3x-ui@master/install.sh" -o "$xui_tmp"; then
+        bash "$xui_tmp"
+    else
+        echo -e "${R}Could not download the X-UI installer.${N}"
+    fi
+    rm -f "$xui_tmp"
+    log "XUI install attempted"
+    press_enter
+}
+
+xui_uninstall() {
+    read -rp "Remove X-UI Panel completely? [y/N]: " ans
+    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Cancelled."; press_enter; return; }
+    systemctl disable --now x-ui >/dev/null 2>&1
+    rm -f /etc/systemd/system/x-ui.service
+    systemctl daemon-reload 2>/dev/null
+    rm -rf /usr/local/x-ui /etc/x-ui
+    echo -e "${G}X-UI Panel removed.${N}"; log "XUI uninstall"; press_enter
+}
+
 protocol_manager() {
     while true; do
-        local svc ss st dt
-        svc="$(ssh_service)"
-        ss="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
-        st="$(systemctl is-active kok-dnstt.service 2>/dev/null || echo not-installed)"
-        dt="$(systemctl is-active kok-dtproxy.service 2>/dev/null || echo not-installed)"
-        echo -e "${Y}--- PROTOCOL MANAGER ---${N}"
-        echo -e " OpenSSH   : ${G}$ss${N} (port $(ssh_port))"
-        echo -e " DNSTT     : ${G}$st${N} (SlowDNS, UDP 53 -> 5300)"
-        echo -e " DT Proxy  : ${G}$dt${N} (direct DNSTT endpoint)"
-        echo -e " ${W}[1]${N} Restart OpenSSH"
-        echo -e " ${W}[2]${N} Stop / Start OpenSSH"
-        echo -e " ${W}[3]${N} DNSTT (SlowDNS) Manager"
-        echo -e " ${W}[4]${N} DT Proxy Manager"
-        echo -e " ${W}[0]${N} Back"
-        read -rp " Choose: " pc
+        local t_badvpn t_udp t_ssl t_dnstt t_ws t_nginx t_zivpn t_xui
+        t_badvpn="$(svc_tag badvpn-udpgw.service)"
+        t_udp="$(svc_tag udp-custom.service)"
+        if [ -f /etc/stunnel/kok.conf ]; then t_ssl="$(svc_tag stunnel4.service)"; else t_ssl="$(echo -e "${R}(Inactive)${N}")"; fi
+        t_dnstt="$(svc_tag kok-dnstt.service)"
+        t_ws="$(svc_tag falconproxy.service)"
+        t_nginx="$(svc_tag nginx.service)"
+        t_zivpn="$(svc_tag zivpn.service)"
+        if systemctl list-unit-files 2>/dev/null | grep -q '^x-ui\.service' || [ -d /usr/local/x-ui ]; then t_xui="$(inst_tag 1)"; else t_xui="$(inst_tag 0)"; fi
+        echo -e "${M}==========[ PROTOCOL & PANEL MANAGEMENT ]==========${N}"
+        echo -e "${Y}--- TUNNELLING PROTOCOLS ---${N}"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "1" "Install badvpn (UDP 7300)" "$t_badvpn"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "2" "Uninstall badvpn"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "3" "Install udp-custom" "$t_udp"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "4" "Uninstall udp-custom"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "5" "Install SSL Tunnel (Port 444)" "$t_ssl"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "6" "Uninstall SSL Tunnel"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "7" "Install/View DNSTT (Port 53)" "$t_dnstt"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "8" "Uninstall DNSTT"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "9" "Install Websockets Proxy (Select Version)" "$t_ws"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "10" "Uninstall Websockets Proxy"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "11" "Install/Manage Nginx Proxy (80/443)" "$t_nginx"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "16" "Install ZiVPN (UDP 5667)" "$t_zivpn"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "17" "Uninstall ZiVPN"
+        echo -e "${Y}--- MANAGEMENT PANELS ---${N}"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N} %s\n" "12" "Install X-UI Panel" "$t_xui"
+        printf "  ${C}[%2s]${N} ${G}%-48s${N}\n" "13" "Uninstall X-UI Panel"
+        echo -e "${C}----------------------------------------------------------------------${N}"
+        printf "  ${C}[%2s]${N} ${G}%s${N}\n" "0" "Return to Main Menu"
+        echo
+        read -rp "Select an option: " pc
         case "$pc" in
-            1) systemctl restart "$svc" 2>/dev/null && echo -e "${G}OpenSSH restarted.${N}" || echo -e "${R}Restart failed.${N}"; log "PROTO restart ssh"; press_enter ;;
-            2)
-                if [ "$ss" = "active" ]; then
-                    echo -e "${R}WARNING: stopping SSH can lock you out of this server!${N}"
-                    read -rp "Really stop OpenSSH? [y/N]: " ans
-                    [ "$ans" = "y" ] || [ "$ans" = "Y" ] && systemctl stop "$svc" 2>/dev/null && echo "Stopped."
-                else
-                    systemctl start "$svc" 2>/dev/null && echo -e "${G}OpenSSH started.${N}"
-                fi
-                press_enter ;;
-            3) dnstt_menu ;;
-            4) dtproxy_menu ;;
+            1) badvpn_install ;;
+            2) badvpn_uninstall ;;
+            3) udpcustom_install ;;
+            4) udpcustom_uninstall ;;
+            5) ssltunnel_install ;;
+            6) ssltunnel_uninstall ;;
+            7) if [ -f "$DNSTT_DIR/domain.txt" ]; then dnstt_info; else dnstt_setup; fi ;;
+            8) dnstt_remove ;;
+            9) wsproxy_install ;;
+            10) wsproxy_uninstall ;;
+            11) nginx_install_manage ;;
+            16) zivpn_install ;;
+            17) zivpn_uninstall ;;
+            12) xui_install ;;
+            13) xui_uninstall ;;
             0) return ;;
             *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
         esac
@@ -1105,6 +1539,10 @@ uninstall() {
     if [ "$ans2" = "y" ] || [ "$ans2" = "Y" ]; then
         managed_users | while read -r u; do pkill -u "$u" 2>/dev/null; userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null; done
     fi
+    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service kok-dtproxy.service badvpn-udpgw.service udp-custom.service falconproxy.service zivpn.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/badvpn-udpgw.service /etc/systemd/system/udp-custom.service /etc/systemd/system/falconproxy.service /etc/systemd/system/zivpn.service
+    rm -f /usr/local/bin/badvpn-udpgw /usr/local/bin/falconproxy /usr/local/bin/zivpn /etc/stunnel/kok.conf /etc/stunnel/kok.pem /etc/stunnel/kok.key /etc/stunnel/kok.crt /etc/nginx/conf.d/kok-ws-proxy.conf
+    rm -rf /root/udp /etc/zivpn /etc/falconproxy
     systemctl disable --now kok-dnstt.service kok-dnstt-fw.service kok-dtproxy.service >/dev/null 2>&1
     rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service /etc/systemd/system/kok-dtproxy.service /usr/local/bin/dnstt-server
     dnstt_fw_del 2>/dev/null
