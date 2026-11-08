@@ -10,6 +10,10 @@ removed=0
 while IFS='|' read -r u _p _c exp _l _t; do
     if [ -z "$u" ]; then continue; fi
     if [ "$exp" -le "$now" ] 2>/dev/null; then
+        uid="$(id -u "$u" 2>/dev/null)"
+        [ -n "$uid" ] && iptables -D OUTPUT -m owner --uid-owner "$uid" -m comment --comment "kokbw:$u" -j ACCEPT 2>/dev/null
+        [ -f "$CONF_DIR/bw.state" ] && sed -i "/^$u|/d" "$CONF_DIR/bw.state"
+        [ -f "$CONF_DIR/bw.locked" ] && sed -i "/^$u$/d" "$CONF_DIR/bw.locked"
         pkill -u "$u" 2>/dev/null
         userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null
         echo "[$(date '+%F %T')] EXPIRED-REMOVED user=$u" >> "$LOG_FILE" 2>/dev/null
