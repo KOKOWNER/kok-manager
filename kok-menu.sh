@@ -69,7 +69,7 @@ check_activation() {
 rand_str() { tr -dc 'a-z0-9' </dev/urandom | head -c "$1"; }
 rand_pass() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
 
-valid_username() { [[ "$1" =~ ^[a-z_][a-z0-9_-]{2,31}$ ]]; }
+valid_username() { [[ "$1" =~ ^[a-zA-Z_][a-zA-Z0-9_-]{2,31}$ ]]; }
 
 db_get() { grep -F "$1|" "$DB" 2>/dev/null | head -1; }
 
@@ -78,10 +78,40 @@ db_remove() {
     mv "$DB.tmp" "$DB"; chmod 600 "$DB"
 }
 
-db_add() { echo "$1|$2|$3|$4|$5|$6" >> "$DB"; chmod 600 "$DB"; }
+db_add() { echo "$1|$2|$3|$4|$5|$6|${7:-0}" >> "$DB"; chmod 600 "$DB"; }
 
-db_update() { # user pass created expiry limit type
-    db_remove "$1"; db_add "$1" "$2" "$3" "$4" "$5" "$6"
+db_update() { # user pass created expiry limit type bwgb
+    db_remove "$1"; db_add "$1" "$2" "$3" "$4" "$5" "$6" "${7:-0}"
+}
+
+BW_STATE="$CONF_DIR/bw.state"
+BW_LOCKED="$CONF_DIR/bw.locked"
+
+bw_rule_add() {
+    local uid; uid="$(id -u "$1" 2>/dev/null)" || return 0
+    iptables -C OUTPUT -m owner --uid-owner "$uid" -m comment --comment "kokbw:$1" -j ACCEPT 2>/dev/null \
+        || iptables -A OUTPUT -m owner --uid-owner "$uid" -m comment --comment "kokbw:$1" -j ACCEPT 2>/dev/null
+    return 0
+}
+
+bw_rule_del() {
+    local uid; uid="$(id -u "$1" 2>/dev/null)" || return 0
+    iptables -D OUTPUT -m owner --uid-owner "$uid" -m comment --comment "kokbw:$1" -j ACCEPT 2>/dev/null
+    return 0
+}
+
+bw_state_clean() {
+    [ -f "$BW_STATE" ] && sed -i "/^$1|/d" "$BW_STATE"
+    [ -f "$BW_LOCKED" ] && sed -i "/^$1$/d" "$BW_LOCKED"
+    return 0
+}
+
+bw_used_display() { # $1 user  $2 quota GB (0/empty = unlimited)
+    local total gb
+    total="$(awk -F'|' -v u="$1" '$1==u{print $3}' "$BW_STATE" 2>/dev/null | head -1)"
+    [ -z "$total" ] && total=0
+    gb="$(awk -v b="$total" 'BEGIN{printf "%.1f", b/1073741824}')"
+    if [ -z "$2" ] || [ "$2" = "0" ]; then echo "${gb}/Unlimited"; else echo "${gb}/${2} GB"; fi
 }
 
 days_left() {
@@ -201,47 +231,51 @@ section() { echo -e "${M}═══════════════[ $1 ]═�
 
 # ---------- account actions ----------
 create_account() {
-    echo -e "${Y}--- CREATE NEW USER ---${N}"
-    echo "  [1] Normal account (days)"
-    echo "  [2] Trial account (hours)"
-    read -rp " Choose [1]: " at; at="${at:-1}"
-    if [ "$at" = "2" ]; then trial_account; return; fi
-    read -rp "Username: " u
-    if ! valid_username "$u"; then echo -e "${R}Invalid username (3-32 chars, start with a-z or _, then a-z 0-9 _ -).${N}"; press_enter; return; fi
+    echo -e "${M}--- ✨ Create New SSH User ---${N}"
+    local u p d lim bw now exp expdate yn
+    read -rp "👉 Enter username (or '0' to cancel): " u
+    if [ -z "$u" ] || [ "$u" = "0" ]; then echo "Cancelled."; press_enter; return; fi
+    if ! valid_username "$u"; then echo -e "${R}Invalid username (3-32 chars, start with a letter or _, then letters 0-9 _ -).${N}"; press_enter; return; fi
     if id "$u" >/dev/null 2>&1; then echo -e "${R}User '$u' already exists.${N}"; press_enter; return; fi
-    read -rp "Password (ENTER = auto-generate): " p
+    read -rp "🔑 Enter password (or press Enter for auto-generated): " p
     [ -z "$p" ] && p="$(rand_pass 10)"
-    read -rp "Validity days [30]: " d; d="${d:-30}"
+    read -rp "📅 Enter account duration (in days): " d
     [[ "$d" =~ ^[0-9]+$ ]] && [ "$d" -gt 0 ] || { echo -e "${R}Invalid days.${N}"; press_enter; return; }
-    read -rp "Multi-login limit (0 = unlimited) [1]: " lim; lim="${lim:-1}"
+    read -rp "📊 Enter simultaneous connection limit [1]: " lim; lim="${lim:-1}"
     [[ "$lim" =~ ^[0-9]+$ ]] || { echo -e "${R}Invalid limit.${N}"; press_enter; return; }
+    read -rp "📦 Enter bandwidth limit in GB (0 = unlimited) [0]: " bw; bw="${bw:-0}"
+    [[ "$bw" =~ ^[0-9]+$ ]] || { echo -e "${R}Invalid bandwidth limit.${N}"; press_enter; return; }
 
-    local now exp expdate
     now=$(date +%s); exp=$(( now + d*86400 )); expdate="$(date -d "@$exp" '+%Y-%m-%d')"
-    useradd -M -s /bin/false "$u" || { echo -e "${R}useradd failed.${N}"; press_enter; return; }
+    # Uppercase names (allowed, like the original) need a tolerant creator:
+    # useradd --badnames where supported, adduser --force-badname otherwise.
+    local created=0
+    if [[ "$u" =~ [A-Z] ]]; then
+        if useradd --badnames -M -s /bin/false "$u" 2>/dev/null; then created=1;
+        elif command -v adduser >/dev/null 2>&1 && adduser --force-badname --disabled-password --gecos "" --shell /bin/false --no-create-home "$u" >/dev/null 2>&1; then created=1; fi
+    else
+        useradd -M -s /bin/false "$u" 2>/dev/null && created=1
+    fi
+    [ "$created" = "1" ] || { echo -e "${R}Could not create the system user.${N}"; press_enter; return; }
     echo "$u:$p" | chpasswd
     chage -E "$expdate" -m 0 -M 99999 -I -1 "$u"
-    db_add "$u" "$p" "$now" "$exp" "$lim" "premium"
-    log "CREATE user=$u days=$d limit=$lim"
-    echo -e "${G}Account created successfully.${N}"
-    show_account_info "$u" "$p" "$exp" "$lim"
-    press_enter
-}
-
-trial_account() {
-    echo -e "${Y}--- CREATE TRIAL ACCOUNT ---${N}"
-    read -rp "Validity hours [3]: " h; h="${h:-3}"
-    [[ "$h" =~ ^[0-9]+$ ]] && [ "$h" -gt 0 ] || { echo -e "${R}Invalid hours.${N}"; press_enter; return; }
-    local u p now exp expdate
-    u="trial$(rand_str 5)"; p="$(rand_pass 8)"
-    now=$(date +%s); exp=$(( now + h*3600 )); expdate="$(date -d "@$((exp + 86400))" '+%Y-%m-%d')"
-    useradd -M -s /bin/false "$u" || { echo -e "${R}useradd failed.${N}"; press_enter; return; }
-    echo "$u:$p" | chpasswd
-    chage -E "$expdate" -m 0 -M 99999 -I -1 "$u"
-    db_add "$u" "$p" "$now" "$exp" "1" "trial"
-    log "TRIAL user=$u hours=$h"
-    echo -e "${G}Trial account created. It is removed automatically when it expires.${N}"
-    show_account_info "$u" "$p" "$exp" "1"
+    db_add "$u" "$p" "$now" "$exp" "$lim" "premium" "$bw"
+    bw_rule_add "$u"
+    log "CREATE user=$u days=$d limit=$lim bw=${bw}GB"
+    echo -e "${G}✅ User '$u' created successfully!${N}"
+    echo -e " - 👤 Username:         ${G}$u${N}"
+    echo -e " - 🔑 Password:         ${G}$p${N}"
+    echo -e " - 📅 Expires on:       ${G}$expdate${N}"
+    echo -e " - 📊 Connection Limit: ${G}$lim${N}"
+    if [ "$bw" = "0" ]; then
+        echo -e " - 📦 Bandwidth Limit:  ${G}Unlimited${N}"
+    else
+        echo -e " - 📦 Bandwidth Limit:  ${G}$bw GB${N}"
+    fi
+    echo -e "   ${C}(Active monitoring service will enforce these limits)${N}"
+    echo
+    read -rp "👉 Do you want to generate a client connection config for this user? (y/n): " yn
+    if [ "$yn" = "y" ] || [ "$yn" = "Y" ]; then print_client_config "$u"; fi
     press_enter
 }
 
@@ -266,7 +300,7 @@ pick_user() {
 
 renew_account() {
     echo -e "${Y}--- RENEW USER ACCOUNT ---${N}"
-    local u row exp d now newexp p c l t
+    local u row exp d now newexp p c l t bw
     u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
     row="$(db_get "$u")"; exp="$(echo "$row" | cut -d'|' -f4)"
     read -rp "Add how many days? [30]: " d; d="${d:-30}"
@@ -275,8 +309,8 @@ renew_account() {
     if [ "$exp" -gt "$now" ]; then newexp=$(( exp + d*86400 )); else newexp=$(( now + d*86400 )); fi
     chage -E "$(date -d "@$newexp" '+%Y-%m-%d')" "$u"
     p="$(echo "$row" | cut -d'|' -f2)"; c="$(echo "$row" | cut -d'|' -f3)"
-    l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"
-    db_update "$u" "$p" "$c" "$newexp" "$l" "$t"
+    l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"; bw="$(echo "$row" | cut -d'|' -f7)"
+    db_update "$u" "$p" "$c" "$newexp" "$l" "$t" "$bw"
     log "RENEW user=$u add_days=$d new_expiry=$newexp"
     echo -e "${G}'$u' renewed. New expiry: $(date -d "@$newexp" '+%Y-%m-%d') (${d} days added).${N}"
     press_enter
@@ -288,9 +322,11 @@ delete_account() {
     u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
     read -rp "Really delete '$u'? [y/N]: " ans
     if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+        bw_rule_del "$u"
         pkill -u "$u" 2>/dev/null
         userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null
         db_remove "$u"
+        bw_state_clean "$u"
         log "DELETE user=$u"
         echo -e "${G}'$u' deleted.${N}"
     else
@@ -301,13 +337,13 @@ delete_account() {
 
 list_accounts() {
     echo -e "${Y}--- LIST MANAGED USERS ---${N}"
-    printf "%-4s %-18s %-12s %-8s %-6s %-9s %s\n" "No" "Username" "Password" "Left" "Limit" "Status" "Type"
-    echo "---------------------------------------------------------------------"
+    printf "%-4s %-16s %-12s %-7s %-6s %-17s %-9s %s\n" "No" "Username" "Password" "Left" "Limit" "Bandwidth used" "Status" "Type"
+    echo "-----------------------------------------------------------------------------------"
     local i=0
-    while IFS='|' read -r u p _c e l t; do
+    while IFS='|' read -r u p _c e l t bw; do
         [ -z "$u" ] && continue
         i=$((i+1))
-        printf "%-4s %-18s %-12s %-8s %-6s %-9s %s\n" "$i" "$u" "$p" "$(days_left "$e")d" "$l" "$(acct_status "$u" "$e")" "$t"
+        printf "%-4s %-16s %-12s %-7s %-6s %-17s %-9s %s\n" "$i" "$u" "$p" "$(days_left "$e")d" "$l" "$(bw_used_display "$u" "$bw")" "$(acct_status "$u" "$e")" "$t"
     done < "$DB"
     [ "$i" -eq 0 ] && echo "(no accounts)"
     local list count
@@ -342,16 +378,18 @@ lock_unlock() { # $1 = lock | unlock
 
 edit_user() {
     echo -e "${Y}--- EDIT USER DETAILS ---${N}"
-    local u row p c e l t
+    local u row p c e l t bw
     u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
     row="$(db_get "$u")"
     p="$(echo "$row" | cut -d'|' -f2)"; c="$(echo "$row" | cut -d'|' -f3)"
-    e="$(echo "$row" | cut -d'|' -f4)"; l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"
+    e="$(echo "$row" | cut -d'|' -f4)"; l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"; bw="$(echo "$row" | cut -d'|' -f7)"
     echo -e " User    : ${W}$u${N}"
     echo -e " Password: ${W}$p${N}   Limit: ${W}$l${N}   Expires: ${W}$(date -d "@$e" '+%Y-%m-%d')${N} ($(days_left "$e") days left)"
+    echo -e " Bandwidth: ${W}$(bw_used_display "$u" "$bw")${N}"
     echo "  [1] Change password"
     echo "  [2] Set expiry (days from today)"
     echo "  [3] Change multi-login limit"
+    echo "  [4] Change bandwidth limit (GB)"
     echo "  [0] Back"
     read -rp " Choose: " ec
     case "$ec" in
@@ -372,41 +410,67 @@ edit_user() {
             read -rp "New limit (0 = unlimited): " nl
             if [[ "$nl" =~ ^[0-9]+$ ]]; then l="$nl"; echo -e "${G}Limit set to $l.${N}"; else echo -e "${R}Invalid limit.${N}"; fi
             ;;
+        4)
+            read -rp "New bandwidth limit in GB (0 = unlimited): " nb
+            if [[ "$nb" =~ ^[0-9]+$ ]]; then bw="$nb"; echo -e "${G}Bandwidth limit set to $bw GB. The monitor unlocks the account within a minute if usage is below the new limit.${N}"; else echo -e "${R}Invalid bandwidth limit.${N}"; fi
+            ;;
         *) echo "Back."; press_enter; return ;;
     esac
-    db_update "$u" "$p" "$c" "$e" "$l" "$t"
+    db_update "$u" "$p" "$c" "$e" "$l" "$t" "$bw"
     log "EDIT user=$u"
     press_enter
 }
 
-generate_config() {
-    echo -e "${Y}--- GENERATE CLIENT CONFIG ---${N}"
-    local u row p e l
-    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
-    row="$(db_get "$u")"
-    p="$(echo "$row" | cut -d'|' -f2)"; e="$(echo "$row" | cut -d'|' -f4)"; l="$(echo "$row" | cut -d'|' -f5)"
-    echo -e "${C}============================================================${N}"
-    echo -e "${Y}              KOK PREMIUM SSH ACCOUNT${N}"
-    echo -e "${C}============================================================${N}"
-    echo -e " Host/IP    : ${G}$(pub_ip)${N}"
-    echo -e " SSH Port   : ${G}$(ssh_port)${N}"
-    echo -e " Username   : ${G}$u${N}"
-    echo -e " Password   : ${G}$p${N}"
-    echo -e " Expires    : ${G}$(date -d "@$e" '+%Y-%m-%d')${N} ($(days_left "$e") days left)"
-    echo -e " Limit      : ${G}$([ "$l" = "0" ] && echo 'Unlimited logins' || echo "$l login(s)")${N}"
+print_client_config() {
+    local u="$1" row p ip
+    row="$(db_get "$u")"; [ -z "$row" ] && return 1
+    p="$(echo "$row" | cut -d'|' -f2)"
+    ip="$(pub_ip)"
+    echo -e "${M}--- 📱 Client Connection Configuration ---${N}"
+    echo -e "${C}Copy the details below to your clipboard:${N}"
+    echo
+    echo -e "${Y}==========================================${N}"
+    echo -e "${W}👤 User Details${N}"
+    echo -e " • Username: ${G}$u${N}"
+    echo -e " • Password: ${G}$p${N}"
+    echo -e " • Host/IP : ${G}$ip${N}"
+    echo -e "${Y}==========================================${N}"
+    echo -e "${W}• SSH Direct:${N}"
+    echo -e " • Host: ${G}$ip${N}"
+    echo -e " • Port: ${G}$(ssh_port)${N}"
+    echo -e " • payload: (Standard SSH)"
+    if [ -f /etc/stunnel/kok.conf ]; then
+        echo -e "${W}• SSL Tunnel:${N}"
+        echo -e " • Host: ${G}$ip${N}"
+        echo -e " • Port: ${G}444${N}"
+        echo -e " • payload: (SSL / Stunnel)"
+    fi
+    if [ -f /etc/falconproxy/ports ]; then
+        echo -e "${W}• Websocket Proxy:${N}"
+        echo -e " • Host: ${G}$ip${N}"
+        echo -e " • Port: ${G}$(awk '{print $1}' /etc/falconproxy/ports)${N}"
+        echo -e " • payload: (Websocket)"
+    fi
     if [ -f "$CONF_DIR/dnstt/domain.txt" ]; then
-        echo -e "${C}------------------------------------------------------------${N}"
-        echo -e "${W} SlowDNS / DNSTT:${N}"
-        echo -e " Nameserver : ${G}$(cat "$CONF_DIR/dnstt/domain.txt")${N}"
-        echo -e " Public Key : ${G}$(cat "$CONF_DIR/dnstt/server.pub" 2>/dev/null)${N}"
+        echo -e "${W}• DNSTT (SlowDNS):${N}"
+        echo -e " • Nameserver: ${G}$(cat "$CONF_DIR/dnstt/domain.txt")${N}"
+        echo -e " • PubKey: ${G}$(cat "$CONF_DIR/dnstt/server.pub" 2>/dev/null)${N}"
+        echo -e " • DNS IP: ${G}1.1.1.1 / 8.8.8.8${N}"
     fi
     if [ -f "$CONF_DIR/dtproxy/domain.txt" ]; then
-        echo -e "${C}------------------------------------------------------------${N}"
-        echo -e "${W} DT Proxy (direct): ${G}$(pub_ip) port $(cat "$CONF_DIR/dtproxy/port.txt" 2>/dev/null)${N}"
-        echo -e " Domain     : ${G}$(cat "$CONF_DIR/dtproxy/domain.txt")${N}"
-        echo -e " Public Key : ${G}$(cat "$CONF_DIR/dtproxy/server.pub" 2>/dev/null)${N}"
+        echo -e "${W}• DT Proxy (SlowDNS direct):${N}"
+        echo -e " • Nameserver: ${G}$(cat "$CONF_DIR/dtproxy/domain.txt")${N}"
+        echo -e " • PubKey: ${G}$(cat "$CONF_DIR/dtproxy/server.pub" 2>/dev/null)${N}"
+        echo -e " • Port: ${G}UDP $(cat "$CONF_DIR/dtproxy/port.txt" 2>/dev/null)${N}"
     fi
-    echo -e "${C}============================================================${N}"
+    echo -e "${Y}==========================================${N}"
+}
+
+generate_config() {
+    echo -e "${Y}--- GENERATE CLIENT CONFIG ---${N}"
+    local u
+    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
+    print_client_config "$u"
     press_enter
 }
 
