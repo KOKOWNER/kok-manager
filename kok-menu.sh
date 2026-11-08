@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  KOK SSH MANAGER  -  main menu program
+#  KOK SSH MANAGER v3  -  main menu program
 #  Clean-room original code, written for KOK.
 #  Installed as: /usr/local/kok-manager/kok-menu.sh
 #  Run with: menu
@@ -12,10 +12,11 @@ DB="$CONF_DIR/users.db"
 KEYS_FILE="$CONF_DIR/keys.txt"
 ACT_FILE="$CONF_DIR/.activated"
 LOG_FILE="/var/log/kok-manager.log"
+BANNER_FILE="$CONF_DIR/banner.txt"
 
 # ---------- colours ----------
 R='\033[1;31m'; G='\033[1;32m'; Y='\033[1;33m'; B='\033[1;34m'
-C='\033[1;36m'; W='\033[1;37m'; N='\033[0m'
+M='\033[1;35m'; C='\033[1;36m'; W='\033[1;37m'; N='\033[0m'
 
 mkdir -p "$CONF_DIR"
 touch "$DB" 2>/dev/null
@@ -79,6 +80,10 @@ db_remove() {
 
 db_add() { echo "$1|$2|$3|$4|$5|$6" >> "$DB"; chmod 600 "$DB"; }
 
+db_update() { # user pass created expiry limit type
+    db_remove "$1"; db_add "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
 days_left() {
     local now exp d
     now=$(date +%s); exp="$1"
@@ -141,36 +146,65 @@ show_account_info() {
     echo -e "${C}----------------------------------------${N}"
 }
 
+# ---------- banner / header ----------
+glyph() {
+    case "$1" in
+        K) echo "#  #|# # |##  |# # |#  #" ;;
+        O) echo " ## |#  #|#  #|#  #| ## " ;;
+        M) echo "#   #|## ##|# # #|#   #|#   #" ;;
+        A) echo " ## |#  #|####|#  #|#  #" ;;
+        N) echo "#  #|## #|# ##|#  #|#  #" ;;
+        G) echo " ###|#   |# ##|#  #| ###" ;;
+        E) echo "####|#   |### |#   |####" ;;
+        R) echo "### |#  #|### |# # |#  #" ;;
+        *) echo "    |    |    |    |    " ;;
+    esac
+}
+
+banner_text() {
+    local word="$1" rows=("" "" "" "" "") i ch g r
+    for (( i=0; i<${#word}; i++ )); do
+        ch="${word:i:1}"
+        g="$(glyph "$ch")"
+        for r in 0 1 2 3 4; do
+            rows[$r]+="$(echo "$g" | cut -d'|' -f$((r+1))) "
+        done
+    done
+    for r in 0 1 2 3 4; do echo -e "${M}      ${rows[$r]}${N}"; done
+}
+
 header() {
     clear
-    local total expired online osname ram disk up
-    total=$(managed_users | wc -l)
-    expired=0
-    while IFS='|' read -r u _p _c e _l _t; do
-        [ -z "$u" ] && continue
-        [ "$(date +%s)" -ge "$e" ] 2>/dev/null && expired=$((expired+1))
-    done < "$DB"
-    online=$(online_users | wc -l)
+    local osname up mem users sessions load
     osname="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2)"
-    ram="$(free -m 2>/dev/null | awk '/Mem:/{printf "%sMB / %sMB", $3, $2}')"
-    disk="$(df -h / 2>/dev/null | awk 'NR==2{printf "%s / %s (%s)", $3, $2, $5}')"
     up="$(uptime -p 2>/dev/null | sed 's/^up //')"
-    echo -e "${C}============================================================${N}"
-    echo -e "${Y}              K O K   S S H   M A N A G E R${N}"
-    echo -e "${C}============================================================${N}"
-    echo -e " Server IP : ${G}$(pub_ip)${N}      SSH Port : ${G}$(ssh_port)${N}"
-    echo -e " OS        : ${W}${osname}${N}"
-    echo -e " Uptime    : ${W}${up}${N}"
-    echo -e " RAM       : ${W}${ram}${N}"
-    echo -e " Disk      : ${W}${disk}${N}"
-    echo -e "${C}------------------------------------------------------------${N}"
-    echo -e " Accounts  : ${G}${total}${N}    Online : ${G}${online}${N}    Expired : ${R}${expired}${N}"
-    echo -e "${C}============================================================${N}"
+    mem="$(free -m 2>/dev/null | awk '/Mem:/{printf "%.2f%% Used", $3/$2*100}')"
+    users="$(managed_users | wc -l)"
+    sessions="$(who 2>/dev/null | wc -l)"
+    load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+    echo -e "${C}----------------------------------------------------------------------${N}"
+    banner_text "KOK"
+    banner_text "MANAGER"
+    echo -e "${C}----------------------------------------------------------------------${N}"
+    echo -e "              ${C}PREMIUM SSH & VPN SERVICES${N}"
+    echo -e "              ${Y}Developed by: KOK ${N}<🇲🇲/>"
+    echo -e "${C}----------------------------------------------------------------------${N}"
+    echo -e "${B}======================================================================${N}"
+    printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "OS" "$osname" "Uptime:" "$up"
+    printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "Memory" "$mem" "Online Sessions:" "$sessions"
+    printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "Users" "$users Managed Accounts" "Sys Load (1m):" "$load"
+    echo -e "${B}======================================================================${N}"
 }
+
+section() { echo -e "${M}═══════════════[ $1 ]═══════════════${N}"; }
 
 # ---------- account actions ----------
 create_account() {
-    echo -e "${Y}--- CREATE SSH ACCOUNT ---${N}"
+    echo -e "${Y}--- CREATE NEW USER ---${N}"
+    echo "  [1] Normal account (days)"
+    echo "  [2] Trial account (hours)"
+    read -rp " Choose [1]: " at; at="${at:-1}"
+    if [ "$at" = "2" ]; then trial_account; return; fi
     read -rp "Username: " u
     if ! valid_username "$u"; then echo -e "${R}Invalid username (3-32 chars, start with a-z or _, then a-z 0-9 _ -).${N}"; press_enter; return; fi
     if id "$u" >/dev/null 2>&1; then echo -e "${R}User '$u' already exists.${N}"; press_enter; return; fi
@@ -230,8 +264,8 @@ pick_user() {
 }
 
 renew_account() {
-    echo -e "${Y}--- RENEW ACCOUNT ---${N}"
-    local u row exp d now newexp
+    echo -e "${Y}--- RENEW USER ACCOUNT ---${N}"
+    local u row exp d now newexp p c l t
     u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
     row="$(db_get "$u")"; exp="$(echo "$row" | cut -d'|' -f4)"
     read -rp "Add how many days? [30]: " d; d="${d:-30}"
@@ -239,17 +273,16 @@ renew_account() {
     now=$(date +%s)
     if [ "$exp" -gt "$now" ]; then newexp=$(( exp + d*86400 )); else newexp=$(( now + d*86400 )); fi
     chage -E "$(date -d "@$newexp" '+%Y-%m-%d')" "$u"
-    local p c l t
     p="$(echo "$row" | cut -d'|' -f2)"; c="$(echo "$row" | cut -d'|' -f3)"
     l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"
-    db_remove "$u"; db_add "$u" "$p" "$c" "$newexp" "$l" "$t"
+    db_update "$u" "$p" "$c" "$newexp" "$l" "$t"
     log "RENEW user=$u add_days=$d new_expiry=$newexp"
     echo -e "${G}'$u' renewed. New expiry: $(date -d "@$newexp" '+%Y-%m-%d') (${d} days added).${N}"
     press_enter
 }
 
 delete_account() {
-    echo -e "${Y}--- DELETE ACCOUNT ---${N}"
+    echo -e "${Y}--- DELETE USER ---${N}"
     local u ans
     u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
     read -rp "Really delete '$u'? [y/N]: " ans
@@ -266,7 +299,7 @@ delete_account() {
 }
 
 list_accounts() {
-    echo -e "${Y}--- ACCOUNT LIST ---${N}"
+    echo -e "${Y}--- LIST MANAGED USERS ---${N}"
     printf "%-4s %-18s %-12s %-8s %-6s %-9s %s\n" "No" "Username" "Password" "Left" "Limit" "Status" "Type"
     echo "---------------------------------------------------------------------"
     local i=0
@@ -276,125 +309,103 @@ list_accounts() {
         printf "%-4s %-18s %-12s %-8s %-6s %-9s %s\n" "$i" "$u" "$p" "$(days_left "$e")d" "$l" "$(acct_status "$u" "$e")" "$t"
     done < "$DB"
     [ "$i" -eq 0 ] && echo "(no accounts)"
-    press_enter
-}
-
-lock_account() {
-    echo -e "${Y}--- LOCK / UNLOCK ACCOUNT ---${N}"
-    local u st
-    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
-    st="$(passwd -S "$u" 2>/dev/null | awk '{print $2}')"
-    if [ "$st" = "L" ]; then
-        usermod -U "$u" && echo -e "${G}'$u' unlocked.${N}"; log "UNLOCK user=$u"
-    else
-        pkill -u "$u" 2>/dev/null
-        usermod -L "$u" && echo -e "${G}'$u' locked.${N}"; log "LOCK user=$u"
-    fi
-    press_enter
-}
-
-change_password() {
-    echo -e "${Y}--- CHANGE PASSWORD ---${N}"
-    local u row p c e l t
-    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
-    read -rp "New password (ENTER = auto-generate): " p
-    [ -z "$p" ] && p="$(rand_pass 10)"
-    echo "$u:$p" | chpasswd || { echo -e "${R}Failed.${N}"; press_enter; return; }
-    row="$(db_get "$u")"
-    c="$(echo "$row" | cut -d'|' -f3)"; e="$(echo "$row" | cut -d'|' -f4)"
-    l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"
-    db_remove "$u"; db_add "$u" "$p" "$c" "$e" "$l" "$t"
-    log "PASSWD user=$u"
-    echo -e "${G}Password for '$u' is now: ${W}$p${N}"
-    press_enter
-}
-
-online_menu() {
-    echo -e "${Y}--- ONLINE USERS ---${N}"
     local list count
     list="$(online_users)"; count="$(printf '%s' "$list" | grep -c . )"
-    if [ -z "$list" ]; then echo "No managed user is online right now."; else
-        echo "$list" | while read -r ou; do
-            echo -e " ${G}●${N} $ou  ($(who | awk -v x="$ou" '$1==x' | wc -l) session(s))"
-        done
-    fi
-    echo
-    read -rp "Kick a user off? Type username (ENTER = back): " ku
-    if [ -n "$ku" ] && [ -n "$(db_get "$ku")" ]; then
-        pkill -u "$ku" && echo -e "${G}Sessions of '$ku' closed.${N}"; log "KICK user=$ku"
+    if [ -n "$list" ]; then
+        echo -e "${Y}Online now:${N}"
+        echo "$list" | while read -r ou; do echo -e " ${G}●${N} $ou"; done
+        read -rp "Kick a user off? Type username (ENTER = back): " ku
+        if [ -n "$ku" ] && [ -n "$(db_get "$ku")" ]; then
+            pkill -u "$ku" && echo -e "${G}Sessions of '$ku' closed.${N}"; log "KICK user=$ku"
+        fi
     fi
     press_enter
 }
 
-server_info() {
-    echo -e "${Y}--- SERVER INFO ---${N}"
-    echo " Hostname : $(hostname)"
-    echo " Public IP: $(pub_ip)"
-    echo " OS       : $(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)"
-    echo " Kernel   : $(uname -r)"
-    echo " CPU      : $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ //') ($(nproc) core(s))"
-    echo " RAM      : $(free -h | awk '/Mem:/{print $3" / "$2}')"
-    echo " Disk /   : $(df -h / | awk 'NR==2{print $3" / "$2" ("$5" used)"}')"
-    echo " SSH port : $(ssh_port)   Service: $(ssh_service)"
-    echo " Accounts : $(managed_users | wc -l) managed"
-    press_enter
-}
-
-restart_ssh() {
-    local svc; svc="$(ssh_service)"
-    if systemctl restart "$svc" 2>/dev/null || service "$svc" restart 2>/dev/null; then
-        echo -e "${G}SSH service ($svc) restarted.${N}"
+lock_unlock() { # $1 = lock | unlock
+    local mode="$1" u st
+    echo -e "${Y}--- ${mode^^} USER ACCOUNT ---${N}"
+    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
+    st="$(passwd -S "$u" 2>/dev/null | awk '{print $2}')"
+    if [ "$mode" = "lock" ]; then
+        if [ "$st" = "L" ]; then echo -e "${Y}'$u' is already locked.${N}"; else
+            pkill -u "$u" 2>/dev/null; usermod -L "$u" && echo -e "${G}'$u' locked.${N}"; log "LOCK user=$u"
+        fi
     else
-        echo -e "${R}Restart failed for service '$svc'.${N}"
-    fi
-    log "RESTART_SSH service=$svc"
-    press_enter
-}
-
-speed_test() {
-    echo -e "${Y}--- SPEED TEST ---${N}"
-    echo "Ping 1.1.1.1:"
-    ping -c 4 -q 1.1.1.1 2>/dev/null | tail -2
-    echo "Download test (25 MB from Cloudflare):"
-    local sp
-    sp="$(curl -s -o /dev/null -w '%{speed_download}' --max-time 30 'https://speed.cloudflare.com/__down?bytes=25000000' 2>/dev/null)"
-    if [ -n "$sp" ] && [ "$sp" != "0" ]; then
-        awk -v b="$sp" 'BEGIN{printf " ~ %.2f Mbps (%.2f MB/s)\n", b*8/1000000, b/1048576}'
-    else
-        echo " Download test failed (network?)."
+        if [ "$st" != "L" ]; then echo -e "${Y}'$u' is not locked.${N}"; else
+            usermod -U "$u" && echo -e "${G}'$u' unlocked.${N}"; log "UNLOCK user=$u"
+        fi
     fi
     press_enter
 }
 
-backup_accounts() {
-    local f="/root/kok-manager-backup-$(date '+%Y%m%d-%H%M').tar.gz"
-    tar -czf "$f" -C / etc/kok-manager/users.db etc/kok-manager/keys.txt 2>/dev/null \
-        && echo -e "${G}Backup saved: $f${N}" || echo -e "${R}Backup failed.${N}"
-    log "BACKUP file=$f"
+edit_user() {
+    echo -e "${Y}--- EDIT USER DETAILS ---${N}"
+    local u row p c e l t
+    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
+    row="$(db_get "$u")"
+    p="$(echo "$row" | cut -d'|' -f2)"; c="$(echo "$row" | cut -d'|' -f3)"
+    e="$(echo "$row" | cut -d'|' -f4)"; l="$(echo "$row" | cut -d'|' -f5)"; t="$(echo "$row" | cut -d'|' -f6)"
+    echo -e " User    : ${W}$u${N}"
+    echo -e " Password: ${W}$p${N}   Limit: ${W}$l${N}   Expires: ${W}$(date -d "@$e" '+%Y-%m-%d')${N} ($(days_left "$e") days left)"
+    echo "  [1] Change password"
+    echo "  [2] Set expiry (days from today)"
+    echo "  [3] Change multi-login limit"
+    echo "  [0] Back"
+    read -rp " Choose: " ec
+    case "$ec" in
+        1)
+            read -rp "New password (ENTER = auto-generate): " np
+            [ -z "$np" ] && np="$(rand_pass 10)"
+            echo "$u:$np" | chpasswd && p="$np" && echo -e "${G}Password changed: ${W}$p${N}"
+            ;;
+        2)
+            read -rp "Valid for how many days from today? " dd
+            if [[ "$dd" =~ ^[0-9]+$ ]] && [ "$dd" -gt 0 ]; then
+                e=$(( $(date +%s) + dd*86400 ))
+                chage -E "$(date -d "@$e" '+%Y-%m-%d')" "$u"
+                echo -e "${G}New expiry: $(date -d "@$e" '+%Y-%m-%d')${N}"
+            else echo -e "${R}Invalid days.${N}"; fi
+            ;;
+        3)
+            read -rp "New limit (0 = unlimited): " nl
+            if [[ "$nl" =~ ^[0-9]+$ ]]; then l="$nl"; echo -e "${G}Limit set to $l.${N}"; else echo -e "${R}Invalid limit.${N}"; fi
+            ;;
+        *) echo "Back."; press_enter; return ;;
+    esac
+    db_update "$u" "$p" "$c" "$e" "$l" "$t"
+    log "EDIT user=$u"
     press_enter
 }
 
-restore_accounts() {
-    read -rp "Backup file path: " f
-    if [ ! -f "$f" ]; then echo -e "${R}File not found.${N}"; press_enter; return; fi
-    local tmp; tmp="$(mktemp -d)"
-    tar -xzf "$f" -C "$tmp" 2>/dev/null || { echo -e "${R}Cannot read backup.${N}"; rm -rf "$tmp"; press_enter; return; }
-    local rdb="$tmp/etc/kok-manager/users.db"
-    [ -f "$rdb" ] || { echo -e "${R}No users.db in backup.${N}"; rm -rf "$tmp"; press_enter; return; }
-    local restored=0 skipped=0
-    while IFS='|' read -r u p _c e l _t; do
-        [ -z "$u" ] && continue
-        if id "$u" >/dev/null 2>&1; then skipped=$((skipped+1)); continue; fi
-        useradd -M -s /bin/false "$u" 2>/dev/null || { skipped=$((skipped+1)); continue; }
-        echo "$u:$p" | chpasswd
-        chage -E "$(date -d "@$e" '+%Y-%m-%d')" -m 0 -M 99999 -I -1 "$u"
-        grep -F "$u|" "$rdb" >> "$DB"
-        restored=$((restored+1))
-    done < "$rdb"
-    chmod 600 "$DB"
-    rm -rf "$tmp"
-    log "RESTORE file=$f restored=$restored skipped=$skipped"
-    echo -e "${G}Restore done: $restored account(s) restored, $skipped skipped (already exist).${N}"
+generate_config() {
+    echo -e "${Y}--- GENERATE CLIENT CONFIG ---${N}"
+    local u row p e l
+    u="$(pick_user)"; [ -z "$u" ] && { echo -e "${R}Cancelled / not found.${N}"; press_enter; return; }
+    row="$(db_get "$u")"
+    p="$(echo "$row" | cut -d'|' -f2)"; e="$(echo "$row" | cut -d'|' -f4)"; l="$(echo "$row" | cut -d'|' -f5)"
+    echo -e "${C}============================================================${N}"
+    echo -e "${Y}              KOK PREMIUM SSH ACCOUNT${N}"
+    echo -e "${C}============================================================${N}"
+    echo -e " Host/IP    : ${G}$(pub_ip)${N}"
+    echo -e " SSH Port   : ${G}$(ssh_port)${N}"
+    echo -e " Username   : ${G}$u${N}"
+    echo -e " Password   : ${G}$p${N}"
+    echo -e " Expires    : ${G}$(date -d "@$e" '+%Y-%m-%d')${N} ($(days_left "$e") days left)"
+    echo -e " Limit      : ${G}$([ "$l" = "0" ] && echo 'Unlimited logins' || echo "$l login(s)")${N}"
+    if [ -f "$CONF_DIR/dnstt/domain.txt" ]; then
+        echo -e "${C}------------------------------------------------------------${N}"
+        echo -e "${W} SlowDNS / DNSTT:${N}"
+        echo -e " Nameserver : ${G}$(cat "$CONF_DIR/dnstt/domain.txt")${N}"
+        echo -e " Public Key : ${G}$(cat "$CONF_DIR/dnstt/server.pub" 2>/dev/null)${N}"
+    fi
+    if [ -f "$CONF_DIR/dtproxy/domain.txt" ]; then
+        echo -e "${C}------------------------------------------------------------${N}"
+        echo -e "${W} DT Proxy (direct): ${G}$(pub_ip) port $(cat "$CONF_DIR/dtproxy/port.txt" 2>/dev/null)${N}"
+        echo -e " Domain     : ${G}$(cat "$CONF_DIR/dtproxy/domain.txt")${N}"
+        echo -e " Public Key : ${G}$(cat "$CONF_DIR/dtproxy/server.pub" 2>/dev/null)${N}"
+    fi
+    echo -e "${C}============================================================${N}"
     press_enter
 }
 
@@ -524,42 +535,52 @@ dnstt_dns_help() {
     echo -e "${Y}DNS records to add ONE TIME in your domain panel (Cloudflare: DNS only / grey cloud):${N}"
     echo -e "   1) Type ${W}A${N}    Name ${W}$nshost${N}        ->  ${W}$(pub_ip)${N}"
     echo -e "   2) Type ${W}NS${N}   Name ${W}$domain${N}   ->  ${W}$nshost${N}"
-    echo -e " ${W}(Without these 2 records the tunnel cannot work.)${N}"
+    echo -e " ${W}(Tip: menu [13] CloudFlare Free Domain can create these records for you automatically.)${N}"
 }
 
-dnstt_setup() {
-    echo -e "${Y}--- DNSTT (SlowDNS) SETUP ---${N}"
-    mkdir -p "$DNSTT_DIR"; chmod 700 "$DNSTT_DIR"
-    local domain priv pub choice seed tries
-    read -rp "Nameserver / tunnel domain (e.g. t.yourdomain.com): " domain
-    domain="$(printf '%s' "$domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
-    if ! [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$domain" != *.* ]]; then
-        echo -e "${R}Invalid domain.${N}"; press_enter; return
-    fi
-    echo "Key choice:"
-    echo "  [1] Auto-generate a new key"
-    echo "  [2] Use MY OWN private key (favourite numbers -> your public key is derived from it)"
+dnstt_choose_key() { # echoes privkey hex on stdout, prompts on stderr
+    local choice priv seed tries pub tmpk
+    echo "Key choice:" >&2
+    echo "  [1] Auto-generate a new key" >&2
+    echo "  [2] Use MY OWN private key (favourite numbers -> your public key is derived from it)" >&2
     read -rp " Choose [1]: " choice; choice="${choice:-1}"
     if [ "$choice" = "2" ]; then
-        echo -e "${W}Your private key = exactly 64 characters: digits 0-9 and letters a-f only.${N}"
-        echo -e "${W}Example: your favourite numbers repeated, like 241120241120... (64 chars).${N}"
-        echo -e "${W}Same private key on any server always gives the SAME public key for your customers.${N}"
+        echo "Your private key = exactly 64 characters: digits 0-9 and letters a-f only." >&2
+        echo "Example: your favourite numbers repeated, like 241120241120... (64 chars)." >&2
+        echo "Same private key on any server always gives the SAME public key for your customers." >&2
         tries=0
         while [ $tries -lt 3 ]; do
             read -rp "Enter your 64-char private key (ENTER = cancel): " seed
             seed="$(printf '%s' "$seed" | tr -d ' ' | tr 'A-Z' 'a-z')"
-            [ -z "$seed" ] && { echo "Cancelled."; press_enter; return; }
+            [ -z "$seed" ] && { echo ""; return; }
             [[ "$seed" =~ ^[0-9a-f]{64}$ ]] && break
-            echo -e "${R}Not valid: must be exactly 64 chars of 0-9 / a-f (yours: ${#seed} chars).${N}"
+            echo "Not valid: must be exactly 64 chars of 0-9 / a-f (yours: ${#seed} chars)." >&2
             tries=$((tries+1)); seed=""
         done
-        [ -z "$seed" ] && { echo -e "${R}Cancelled after 3 tries.${N}"; press_enter; return; }
+        [ -z "$seed" ] && { echo ""; return; }
         priv="$seed"
     else
         priv="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
     fi
-    pub="$(dnstt_derive_pub "$priv")"
+    echo "$priv"
+}
+
+dnstt_setup() { # $1 = preset domain (optional)
+    echo -e "${Y}--- DNSTT (SlowDNS) SETUP ---${N}"
+    mkdir -p "$DNSTT_DIR"; chmod 700 "$DNSTT_DIR"
+    local domain priv pub
+    domain="$1"
+    if [ -z "$domain" ]; then
+        read -rp "Nameserver / tunnel domain (e.g. t.yourdomain.com): " domain
+    fi
+    domain="$(printf '%s' "$domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
+    if ! [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$domain" != *.* ]]; then
+        echo -e "${R}Invalid domain.${N}"; press_enter; return
+    fi
+    priv="$(dnstt_choose_key)"
+    [ -z "$priv" ] && { echo -e "${R}Cancelled.${N}"; press_enter; return; }
     printf '%s' "$priv" > "$DNSTT_DIR/server.key"; chmod 600 "$DNSTT_DIR/server.key"
+    pub="$(dnstt_derive_pub "$priv")"
     if [ -z "$pub" ]; then pub="$(dnstt_pub_from_run "$DNSTT_DIR/server.key")"; fi
     if [ -z "$pub" ]; then
         echo -e "${R}Could not derive the public key (openssl missing?). Setup stopped.${N}"
@@ -653,24 +674,443 @@ dnstt_menu() {
     done
 }
 
-reboot_server() {
-    read -rp "Reboot the server now? [y/N]: " ans
-    if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then echo "Rebooting..."; sleep 1; reboot; fi
+# ---------- DT Proxy Manager (second, direct DNSTT endpoint) ----------
+DTP_DIR="$CONF_DIR/dtproxy"
+
+dtproxy_write_unit() {
+    local domain="$1" port="$2"
+    cat > /etc/systemd/system/kok-dtproxy.service <<EOF
+[Unit]
+Description=KOK DT Proxy (direct DNSTT endpoint)
+After=network.target
+
+[Service]
+ExecStart=$DNSTT_BIN -udp :$port -privkey-file $DTP_DIR/server.key $domain 127.0.0.1:$(ssh_port)
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable kok-dtproxy.service >/dev/null 2>&1
+}
+
+dtproxy_setup() {
+    echo -e "${Y}--- DT PROXY SETUP (direct DNSTT endpoint) ---${N}"
+    echo -e "${W}This runs a SECOND dnstt endpoint on its own UDP port, for clients${N}"
+    echo -e "${W}that connect directly to SERVER-IP:PORT (no DNS delegation needed).${N}"
+    mkdir -p "$DTP_DIR"; chmod 700 "$DTP_DIR"
+    local domain port priv pub
+    read -rp "Domain label for this endpoint (e.g. dt.yourdomain.com): " domain
+    domain="$(printf '%s' "$domain" | tr -d ' ' | tr 'A-Z' 'a-z')"
+    if ! [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || [[ "$domain" != *.* ]]; then
+        echo -e "${R}Invalid domain.${N}"; press_enter; return
+    fi
+    read -rp "UDP port [5500]: " port; port="${port:-5500}"
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { echo -e "${R}Invalid port.${N}"; press_enter; return; }
+    if [ -f "$DNSTT_DIR/server.key" ]; then
+        priv="$(cat "$DNSTT_DIR/server.key")"
+        echo -e "${G}Reusing your DNSTT private key (same public key for customers).${N}"
+    else
+        priv="$(dnstt_choose_key)"
+        [ -z "$priv" ] && { echo -e "${R}Cancelled.${N}"; press_enter; return; }
+    fi
+    printf '%s' "$priv" > "$DTP_DIR/server.key"; chmod 600 "$DTP_DIR/server.key"
+    pub="$(dnstt_derive_pub "$priv")"
+    if [ -z "$pub" ]; then pub="$(dnstt_pub_from_run "$DTP_DIR/server.key")"; fi
+    [ -z "$pub" ] && { echo -e "${R}Could not derive the public key.${N}"; press_enter; return; }
+    printf '%s' "$pub" > "$DTP_DIR/server.pub"; chmod 644 "$DTP_DIR/server.pub"
+    printf '%s' "$domain" > "$DTP_DIR/domain.txt"
+    printf '%s' "$port" > "$DTP_DIR/port.txt"
+    dnstt_ensure_binary || { echo -e "${R}Config saved, but dnstt-server is not installed yet.${N}"; press_enter; return; }
+    dtproxy_write_unit "$domain" "$port"
+    systemctl restart kok-dtproxy.service 2>/dev/null
+    sleep 1
+    log "DTPROXY setup domain=$domain port=$port"
+    echo -e "${C}----------------------------------------${N}"
+    echo -e "${W}        DT PROXY DETAILS${N}"
+    echo -e "${C}----------------------------------------${N}"
+    echo -e " Resolver   : ${G}$(pub_ip) : $port (UDP, direct)${N}"
+    echo -e " Domain     : ${G}$domain${N}"
+    echo -e " Public Key : ${G}$pub${N}"
+    echo -e " Status     : ${G}$(systemctl is-active kok-dtproxy.service 2>/dev/null || echo unknown)${N}"
+    echo -e "${C}----------------------------------------${N}"
+    press_enter
+}
+
+dtproxy_menu() {
+    while true; do
+        echo -e "${Y}--- DT PROXY MANAGER ---${N}"
+        if [ -f "$DTP_DIR/domain.txt" ]; then
+            echo -e " Domain : ${G}$(cat "$DTP_DIR/domain.txt")${N}   Port: ${G}$(cat "$DTP_DIR/port.txt" 2>/dev/null)${N}   Status: ${G}$(systemctl is-active kok-dtproxy.service 2>/dev/null || echo unknown)${N}"
+        else
+            echo -e " Status : ${R}not set up${N}"
+        fi
+        echo -e " ${W}[1]${N} Setup / Re-setup DT Proxy"
+        echo -e " ${W}[2]${N} Restart DT Proxy"
+        echo -e " ${W}[3]${N} Remove DT Proxy"
+        echo -e " ${W}[0]${N} Back"
+        read -rp " Choose: " dc
+        case "$dc" in
+            1) dtproxy_setup ;;
+            2) systemctl restart kok-dtproxy.service 2>/dev/null && echo -e "${G}Restarted.${N}" || echo -e "${R}Restart failed.${N}"; press_enter ;;
+            3)
+                read -rp "Remove DT Proxy? [y/N]: " ans
+                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+                    systemctl disable --now kok-dtproxy.service >/dev/null 2>&1
+                    rm -f /etc/systemd/system/kok-dtproxy.service
+                    systemctl daemon-reload 2>/dev/null
+                    rm -rf "$DTP_DIR"
+                    echo -e "${G}DT Proxy removed.${N}"
+                else echo "Cancelled."; fi
+                press_enter ;;
+            0) return ;;
+            *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ---------- Protocol Manager ----------
+protocol_manager() {
+    while true; do
+        local svc ss st dt
+        svc="$(ssh_service)"
+        ss="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
+        st="$(systemctl is-active kok-dnstt.service 2>/dev/null || echo not-installed)"
+        dt="$(systemctl is-active kok-dtproxy.service 2>/dev/null || echo not-installed)"
+        echo -e "${Y}--- PROTOCOL MANAGER ---${N}"
+        echo -e " OpenSSH   : ${G}$ss${N} (port $(ssh_port))"
+        echo -e " DNSTT     : ${G}$st${N} (SlowDNS, UDP 53 -> 5300)"
+        echo -e " DT Proxy  : ${G}$dt${N} (direct DNSTT endpoint)"
+        echo -e " ${W}[1]${N} Restart OpenSSH"
+        echo -e " ${W}[2]${N} Stop / Start OpenSSH"
+        echo -e " ${W}[3]${N} DNSTT (SlowDNS) Manager"
+        echo -e " ${W}[4]${N} DT Proxy Manager"
+        echo -e " ${W}[0]${N} Back"
+        read -rp " Choose: " pc
+        case "$pc" in
+            1) systemctl restart "$svc" 2>/dev/null && echo -e "${G}OpenSSH restarted.${N}" || echo -e "${R}Restart failed.${N}"; log "PROTO restart ssh"; press_enter ;;
+            2)
+                if [ "$ss" = "active" ]; then
+                    echo -e "${R}WARNING: stopping SSH can lock you out of this server!${N}"
+                    read -rp "Really stop OpenSSH? [y/N]: " ans
+                    [ "$ans" = "y" ] || [ "$ans" = "Y" ] && systemctl stop "$svc" 2>/dev/null && echo "Stopped."
+                else
+                    systemctl start "$svc" 2>/dev/null && echo -e "${G}OpenSSH started.${N}"
+                fi
+                press_enter ;;
+            3) dnstt_menu ;;
+            4) dtproxy_menu ;;
+            0) return ;;
+            *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ---------- Traffic Monitor (Lite) ----------
+traffic_monitor() {
+    echo -e "${Y}--- TRAFFIC MONITOR (LITE) ---${N}"
+    local iface rx tx
+    iface="$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')"
+    [ -z "$iface" ] && iface="$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -1)"
+    echo -e " Interface : ${G}$iface${N}"
+    if [ -n "$iface" ] && [ -f "/sys/class/net/$iface/statistics/rx_bytes" ]; then
+        rx="$(cat "/sys/class/net/$iface/statistics/rx_bytes")"
+        tx="$(cat "/sys/class/net/$iface/statistics/tx_bytes")"
+        awk -v r="$rx" -v t="$tx" 'BEGIN{
+            printf " Since boot:  RX %.2f GB   TX %.2f GB   Total %.2f GB\n", r/1073741824, t/1073741824, (r+t)/1073741824 }'
+    fi
+    if command -v vnstat >/dev/null 2>&1; then
+        echo -e "${W}vnstat (daily / monthly):${N}"
+        vnstat -d 2>/dev/null | head -12
+        vnstat -m 2>/dev/null | head -8
+    else
+        echo -e "${W}Tip: install 'vnstat' to keep daily/monthly history across reboots.${N}"
+    fi
+    echo
+    echo -e " ${W}[1]${N} Run speed test now"
+    echo -e " ${W}[0]${N} Back"
+    read -rp " Choose: " tc
+    if [ "$tc" = "1" ]; then
+        echo "Ping 1.1.1.1:"; ping -c 4 -q 1.1.1.1 2>/dev/null | tail -2
+        echo "Download test (25 MB from Cloudflare):"
+        local sp
+        sp="$(curl -s -o /dev/null -w '%{speed_download}' --max-time 30 'https://speed.cloudflare.com/__down?bytes=25000000' 2>/dev/null)"
+        if [ -n "$sp" ] && [ "$sp" != "0" ]; then
+            awk -v b="$sp" 'BEGIN{printf " ~ %.2f Mbps (%.2f MB/s)\n", b*8/1000000, b/1048576}'
+        else echo " Download test failed (network?)."; fi
+    fi
+    press_enter
+}
+
+# ---------- Block Torrent (Anti-P2P) ----------
+TORRENT_STRINGS=("BitTorrent" "BitTorrent protocol" "peer_id=" ".torrent" "announce.php?passkey=" "info_hash" "get_peers" "find_node" "announce_peer" "torrent")
+
+torrent_on() {
+    local s chain
+    for chain in FORWARD OUTPUT; do
+        for s in "${TORRENT_STRINGS[@]}"; do
+            iptables -C "$chain" -p tcp -m string --string "$s" --algo bm -j DROP 2>/dev/null \
+                || iptables -A "$chain" -p tcp -m string --string "$s" --algo bm -j DROP 2>/dev/null
+            iptables -C "$chain" -p udp -m string --string "$s" --algo bm -j DROP 2>/dev/null \
+                || iptables -A "$chain" -p udp -m string --string "$s" --algo bm -j DROP 2>/dev/null
+        done
+    done
+}
+
+torrent_off() {
+    local s chain
+    for chain in FORWARD OUTPUT; do
+        for s in "${TORRENT_STRINGS[@]}"; do
+            while iptables -C "$chain" -p tcp -m string --string "$s" --algo bm -j DROP 2>/dev/null; do
+                iptables -D "$chain" -p tcp -m string --string "$s" --algo bm -j DROP 2>/dev/null
+            done
+            while iptables -C "$chain" -p udp -m string --string "$s" --algo bm -j DROP 2>/dev/null; do
+                iptables -D "$chain" -p udp -m string --string "$s" --algo bm -j DROP 2>/dev/null
+            done
+        done
+    done
+}
+
+torrent_status() {
+    if iptables -C FORWARD -p tcp -m string --string "BitTorrent" --algo bm -j DROP 2>/dev/null; then echo "ON"; else echo "OFF"; fi
+}
+
+block_torrent() {
+    echo -e "${Y}--- BLOCK TORRENT (ANTI-P2P) ---${N}"
+    echo -e " Current status: ${G}$(torrent_status)${N}"
+    echo -e " ${W}[1]${N} Enable torrent blocking"
+    echo -e " ${W}[2]${N} Disable torrent blocking"
+    echo -e " ${W}[0]${N} Back"
+    read -rp " Choose: " bc
+    case "$bc" in
+        1) torrent_on; log "TORRENT block on"
+           if [ "$(torrent_status)" = "ON" ]; then
+               echo -e "${G}Torrent blocking enabled (BitTorrent string rules in FORWARD/OUTPUT).${N}"
+           else
+               echo -e "${R}Rules could not be added - iptables is not available/permitted on this server.${N}"
+           fi ;;
+        2) torrent_off; log "TORRENT block off"
+           if [ "$(torrent_status)" = "OFF" ]; then
+               echo -e "${G}Torrent blocking disabled.${N}"
+           else
+               echo -e "${R}Some rules could not be removed - check iptables manually.${N}"
+           fi ;;
+        *) echo "Back." ;;
+    esac
+    press_enter
+}
+
+# ---------- CloudFlare Free Domain (automates DNS records on YOUR domain) ----------
+CF_TOKEN_FILE="$CONF_DIR/cf_token"
+
+cf_api() { # method path [json]
+    local method="$1" path="$2" data="$3" token
+    token="$(cat "$CF_TOKEN_FILE" 2>/dev/null)"
+    [ -z "$token" ] && return 1
+    if [ -n "$data" ]; then
+        curl -s --max-time 30 -X "$method" "https://api.cloudflare.com/client/v4$path" \
+            -H "Authorization: Bearer $token" -H "Content-Type: application/json" --data "$data"
+    else
+        curl -s --max-time 30 -X "$method" "https://api.cloudflare.com/client/v4$path" \
+            -H "Authorization: Bearer $token" -H "Content-Type: application/json"
+    fi
+}
+
+cf_first_id() { grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4; }
+
+cf_upsert_record() { # zone_id type name content
+    local zid="$1" type="$2" name="$3" content="$4" existing resp
+    existing="$(cf_api GET "/zones/$zid/dns_records?type=$type&name=$name" | cf_first_id)"
+    if [ -n "$existing" ]; then
+        resp="$(cf_api PATCH "/zones/$zid/dns_records/$existing" "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$content\",\"proxied\":false,\"ttl\":120}")"
+    else
+        resp="$(cf_api POST "/zones/$zid/dns_records" "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$content\",\"proxied\":false,\"ttl\":120}")"
+    fi
+    case "$resp" in *'"success":true'*) return 0 ;; *) echo "$resp" | head -c 300; return 1 ;; esac
+}
+
+cloudflare_menu() {
+    while true; do
+        echo -e "${Y}--- CLOUDFLARE FREE DOMAIN ---${N}"
+        echo -e "${W}Automates the DNS records for your tunnel on a domain that YOU own${N}"
+        echo -e "${W}in Cloudflare (any cheap domain works - the records are free).${N}"
+        if [ -f "$CF_TOKEN_FILE" ]; then echo -e " CF API token: ${G}saved${N}"; else echo -e " CF API token: ${R}not set${N}"; fi
+        echo -e " ${W}[1]${N} Set / Change Cloudflare API token"
+        echo -e " ${W}[2]${N} Create tunnel domain records automatically (A + NS)"
+        echo -e " ${W}[3]${N} Delete saved token"
+        echo -e " ${W}[0]${N} Back"
+        read -rp " Choose: " cc
+        case "$cc" in
+            1)
+                echo -e "${W}Create the token in Cloudflare: My Profile -> API Tokens ->${N}"
+                echo -e "${W}'Edit zone DNS' template for your zone. Paste it here:${N}"
+                read -rp "CF API Token: " tk
+                tk="$(printf '%s' "$tk" | tr -d ' ')"
+                [ -z "$tk" ] && { echo "Cancelled."; press_enter; continue; }
+                printf '%s' "$tk" > "$CF_TOKEN_FILE"; chmod 600 "$CF_TOKEN_FILE"
+                if cf_api GET "/user/tokens/verify" | grep -q '"success":true'; then
+                    echo -e "${G}Token saved and verified with Cloudflare.${N}"
+                else
+                    echo -e "${Y}Token saved, but Cloudflare did not confirm it (wrong token or no network).${N}"
+                fi
+                press_enter ;;
+            2)
+                [ -f "$CF_TOKEN_FILE" ] || { echo -e "${R}Set the API token first (option 1).${N}"; press_enter; continue; }
+                local zone label nshost fqdn zid ip
+                read -rp "Your domain in Cloudflare (e.g. mydomain.com): " zone
+                zone="$(printf '%s' "$zone" | tr -d ' ' | tr 'A-Z' 'a-z')"
+                read -rp "Tunnel subdomain label [t]: " label; label="${label:-t}"
+                label="$(printf '%s' "$label" | tr -d ' ' | tr 'A-Z' 'a-z')"
+                fqdn="$label.$zone"; nshost="ns.$zone"; ip="$(pub_ip)"
+                zid="$(cf_api GET "/zones?name=$zone" | cf_first_id)"
+                [ -z "$zid" ] && { echo -e "${R}Zone '$zone' not found in this Cloudflare account.${N}"; press_enter; continue; }
+                echo "Creating records:  A  $nshost -> $ip   |   NS  $fqdn -> $nshost"
+                if cf_upsert_record "$zid" "A" "$nshost" "$ip" && cf_upsert_record "$zid" "NS" "$fqdn" "$nshost"; then
+                    echo -e "${G}Records created in Cloudflare.${N}"
+                    log "CF records zone=$zone fqdn=$fqdn"
+                    read -rp "Run DNSTT setup now with domain $fqdn? [Y/n]: " go
+                    if [ "$go" != "n" ] && [ "$go" != "N" ]; then dnstt_setup "$fqdn"; fi
+                else
+                    echo -e "${R}Cloudflare rejected a record (see message above). Check the token's zone permission.${N}"
+                fi
+                press_enter ;;
+            3) rm -f "$CF_TOKEN_FILE"; echo -e "${G}Token deleted.${N}"; press_enter ;;
+            0) return ;;
+            *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ---------- SSH Banner Config ----------
+ssh_banner() {
+    echo -e "${Y}--- SSH BANNER CONFIG ---${N}"
+    if [ -f "$BANNER_FILE" ]; then echo -e " Current banner: ${G}$(cat "$BANNER_FILE")${N}"; else echo -e " Current banner: ${R}(none)${N}"; fi
+    echo -e " ${W}[1]${N} Set banner text (shown in apps before login)"
+    echo -e " ${W}[2]${N} Remove banner"
+    echo -e " ${W}[0]${N} Back"
+    read -rp " Choose: " bc
+    case "$bc" in
+        1)
+            read -rp "Banner text: " bt
+            [ -z "$bt" ] && { echo "Cancelled."; press_enter; return; }
+            printf '%s\n' "$bt" > "$BANNER_FILE"; chmod 644 "$BANNER_FILE"
+            [ -f /etc/ssh/sshd_config.kokbak ] || cp /etc/ssh/sshd_config /etc/ssh/sshd_config.kokbak 2>/dev/null
+            if grep -qE '^[[:space:]]*Banner[[:space:]]' /etc/ssh/sshd_config; then
+                sed -i "s|^[[:space:]]*Banner[[:space:]].*|Banner $BANNER_FILE|" /etc/ssh/sshd_config
+            else
+                echo "Banner $BANNER_FILE" >> /etc/ssh/sshd_config
+            fi
+            systemctl restart "$(ssh_service)" 2>/dev/null || service "$(ssh_service)" restart 2>/dev/null
+            log "BANNER set"
+            echo -e "${G}Banner set and SSH restarted.${N}" ;;
+        2)
+            sed -i "\|^[[:space:]]*Banner[[:space:]]\+$BANNER_FILE|d" /etc/ssh/sshd_config 2>/dev/null
+            rm -f "$BANNER_FILE"
+            systemctl restart "$(ssh_service)" 2>/dev/null || service "$(ssh_service)" restart 2>/dev/null
+            echo -e "${G}Banner removed.${N}" ;;
+        *) echo "Back." ;;
+    esac
+    press_enter
+}
+
+# ---------- Auto-Reboot Task ----------
+REBOOT_CRON="/etc/cron.d/kok-autoreboot"
+
+auto_reboot() {
+    while true; do
+        echo -e "${Y}--- AUTO-REBOOT TASK ---${N}"
+        if [ -f "$REBOOT_CRON" ]; then echo -e " Schedule: ${G}$(grep -v '^#' "$REBOOT_CRON" | head -1)${N}"; else echo -e " Schedule: ${R}not set${N}"; fi
+        echo -e " ${W}[1]${N} Set daily reboot time"
+        echo -e " ${W}[2]${N} Set weekly reboot (Sunday)"
+        echo -e " ${W}[3]${N} Disable auto-reboot"
+        echo -e " ${W}[4]${N} Reboot server NOW"
+        echo -e " ${W}[0]${N} Back"
+        read -rp " Choose: " rc
+        case "$rc" in
+            1|2)
+                read -rp "Time (HH:MM, 24h) [04:00]: " tm; tm="${tm:-04:00}"
+                if [[ "$tm" =~ ^([0-9]{1,2}):([0-9]{2})$ ]] && [ "${BASH_REMATCH[1]}" -le 23 ] && [ "${BASH_REMATCH[2]}" -le 59 ]; then
+                    local dow="*"
+                    [ "$rc" = "2" ] && dow="0"
+                    printf '# KOK SSH Manager auto-reboot\n%s %s * * %s root /sbin/reboot\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" "$dow" > "$REBOOT_CRON"
+                    chmod 644 "$REBOOT_CRON"
+                    log "AUTOREBOOT set $tm dow=$dow"
+                    echo -e "${G}Auto-reboot set for $tm $([ "$rc" = "2" ] && echo '(weekly, Sunday)' || echo '(daily)').${N}"
+                else echo -e "${R}Invalid time format.${N}"; fi
+                press_enter ;;
+            3) rm -f "$REBOOT_CRON"; echo -e "${G}Auto-reboot disabled.${N}"; press_enter ;;
+            4)
+                read -rp "Reboot the server now? [y/N]: " ans
+                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then echo "Rebooting..."; sleep 1; reboot; fi
+                press_enter ;;
+            0) return ;;
+            *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ---------- Cleanup / Backup / Restore ----------
+cleanup_expired() {
+    echo -e "${Y}--- CLEANUP EXPIRED USERS ---${N}"
+    if [ -f "$BASE_DIR/kok-expire.sh" ]; then
+        bash "$BASE_DIR/kok-expire.sh"
+        echo -e "${G}Cleanup finished (expired accounts were removed).${N}"
+    else
+        echo -e "${R}kok-expire.sh not found.${N}"
+    fi
+    log "CLEANUP manual"
+    press_enter
+}
+
+backup_accounts() {
+    local f="/root/kok-manager-backup-$(date '+%Y%m%d-%H%M').tar.gz"
+    tar -czf "$f" -C / etc/kok-manager/users.db etc/kok-manager/keys.txt 2>/dev/null \
+        && echo -e "${G}Backup saved: $f${N}" || echo -e "${R}Backup failed.${N}"
+    log "BACKUP file=$f"
+    press_enter
+}
+
+restore_accounts() {
+    read -rp "Backup file path: " f
+    if [ ! -f "$f" ]; then echo -e "${R}File not found.${N}"; press_enter; return; fi
+    local tmp; tmp="$(mktemp -d)"
+    tar -xzf "$f" -C "$tmp" 2>/dev/null || { echo -e "${R}Cannot read backup.${N}"; rm -rf "$tmp"; press_enter; return; }
+    local rdb="$tmp/etc/kok-manager/users.db"
+    [ -f "$rdb" ] || { echo -e "${R}No users.db in backup.${N}"; rm -rf "$tmp"; press_enter; return; }
+    local restored=0 skipped=0
+    while IFS='|' read -r u p _c e l _t; do
+        [ -z "$u" ] && continue
+        if id "$u" >/dev/null 2>&1; then skipped=$((skipped+1)); continue; fi
+        useradd -M -s /bin/false "$u" 2>/dev/null || { skipped=$((skipped+1)); continue; }
+        echo "$u:$p" | chpasswd
+        chage -E "$(date -d "@$e" '+%Y-%m-%d')" -m 0 -M 99999 -I -1 "$u"
+        grep -F "$u|" "$rdb" >> "$DB"
+        restored=$((restored+1))
+    done < "$rdb"
+    chmod 600 "$DB"
+    rm -rf "$tmp"
+    log "RESTORE file=$f restored=$restored skipped=$skipped"
+    echo -e "${G}Restore done: $restored account(s) restored, $skipped skipped (already exist).${N}"
     press_enter
 }
 
 uninstall() {
-    echo -e "${R}--- UNINSTALL KOK SSH MANAGER ---${N}"
+    echo -e "${R}--- UNINSTALL SCRIPT ---${N}"
     read -rp "Remove the manager? [y/N]: " ans
     [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Cancelled."; press_enter; return; }
     read -rp "Also DELETE all managed SSH accounts? [y/N]: " ans2
     if [ "$ans2" = "y" ] || [ "$ans2" = "Y" ]; then
         managed_users | while read -r u; do pkill -u "$u" 2>/dev/null; userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null; done
     fi
-    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service >/dev/null 2>&1
-    rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service /usr/local/bin/dnstt-server
+    systemctl disable --now kok-dnstt.service kok-dnstt-fw.service kok-dtproxy.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/kok-dnstt.service /etc/systemd/system/kok-dnstt-fw.service /etc/systemd/system/kok-dtproxy.service /usr/local/bin/dnstt-server
     dnstt_fw_del 2>/dev/null
-    rm -f /etc/cron.d/kok-manager /usr/local/bin/menu /usr/local/bin/kok-genkey
+    torrent_off 2>/dev/null
+    sed -i "\|^[[:space:]]*Banner[[:space:]]\+$BANNER_FILE|d" /etc/ssh/sshd_config 2>/dev/null
+    rm -f /etc/cron.d/kok-manager /etc/cron.d/kok-autoreboot /usr/local/bin/menu /usr/local/bin/kok-genkey
     rm -rf "$BASE_DIR" "$CONF_DIR"
     echo -e "${G}KOK SSH Manager removed. Goodbye!${N}"
     exit 0
@@ -682,42 +1122,45 @@ check_activation
 
 while true; do
     header
-    echo -e " ${W}[1]${N}  Create SSH Account"
-    echo -e " ${W}[2]${N}  Trial Account"
-    echo -e " ${W}[3]${N}  Renew Account"
-    echo -e " ${W}[4]${N}  Delete Account"
-    echo -e " ${W}[5]${N}  List Accounts"
-    echo -e " ${W}[6]${N}  Lock / Unlock Account"
-    echo -e " ${W}[7]${N}  Change Password"
-    echo -e " ${W}[8]${N}  Online Users"
-    echo -e " ${W}[9]${N}  Server Info"
-    echo -e " ${W}[10]${N} Restart SSH Service"
-    echo -e " ${W}[11]${N} Speed Test"
-    echo -e " ${W}[12]${N} Backup Accounts"
-    echo -e " ${W}[13]${N} Restore Accounts"
-    echo -e " ${W}[14]${N} Reboot Server"
-    echo -e " ${W}[15]${N} Uninstall Manager"
-    echo -e " ${W}[16]${N} DNSTT (SlowDNS)"
-    echo -e " ${W}[0]${N}  Exit"
-    echo -e "${C}------------------------------------------------------------${N}"
-    read -rp " Choose: " choice
+    section "👤  USER MANAGEMENT"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "1" "Create New User" "5" "Unlock User Account"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "2" "Delete User" "6" "Edit User Details"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "3" "Renew User Account" "7" "List Managed Users"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "4" "Lock User Account" "8" "Generate Client Config"
+    echo
+    section "🌐  VPN & PROTOCOLS"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "9" "Protocol Manager" "11" "Traffic Monitor (Lite)"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "10" "DT Proxy Manager" "12" "Block Torrent (Anti-P2P)"
+    echo
+    section "⚙️   SYSTEM SETTINGS"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "13" "CloudFlare Free Domain" "16" "Backup User Data"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "14" "SSH Banner Config" "17" "Restore User Data"
+    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "15" "Auto-Reboot Task" "18" "Cleanup Expired Users"
+    echo
+    echo -e "${R}═══════════════[ 🔥  DANGER ZONE ]═══════════════${N}"
+    printf "  ${R}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "99" "Uninstall Script" "0" "Exit"
+    echo
+    read -rp "👉 Select an option: " choice
     case "$choice" in
         1) create_account ;;
-        2) trial_account ;;
+        2) delete_account ;;
         3) renew_account ;;
-        4) delete_account ;;
-        5) list_accounts ;;
-        6) lock_account ;;
-        7) change_password ;;
-        8) online_menu ;;
-        9) server_info ;;
-        10) restart_ssh ;;
-        11) speed_test ;;
-        12) backup_accounts ;;
-        13) restore_accounts ;;
-        14) reboot_server ;;
-        15) uninstall ;;
-        16) dnstt_menu ;;
+        4) lock_unlock lock ;;
+        5) lock_unlock unlock ;;
+        6) edit_user ;;
+        7) list_accounts ;;
+        8) generate_config ;;
+        9) protocol_manager ;;
+        10) dtproxy_menu ;;
+        11) traffic_monitor ;;
+        12) block_torrent ;;
+        13) cloudflare_menu ;;
+        14) ssh_banner ;;
+        15) auto_reboot ;;
+        16) backup_accounts ;;
+        17) restore_accounts ;;
+        18) cleanup_expired ;;
+        99) uninstall ;;
         0) echo "Bye!"; exit 0 ;;
         *) echo -e "${R}Invalid choice.${N}"; sleep 1 ;;
     esac
