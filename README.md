@@ -21,9 +21,11 @@ GitHub ကနေ one-line တပ်ချင်ရင် ဒီ folder ကို
 menu
 ```
 
-- SSH အကောင့် ထုတ် / Trial ထုတ် / သက်တမ်းတိုး / ဖျက် / စာရင်း / Lock / password ပြောင်း
+- Menu ကို အပိုင်း ၄ ခု (USER MANAGEMENT / VPN & PROTOCOLS / SYSTEM SETTINGS / DANGER ZONE) နဲ့ နှစ်ကော်လံ ပြတယ်
+- SSH အကောင့် ထုတ် / Trial / သက်တမ်းတိုး / ဖျက် / Lock / Unlock / Edit (password, ရက်, limit ပြင်) / စာရင်း / Generate Client Config
 - Online user ကြည့်၊ session ပိတ်ချ
-- Server info, SSH restart, Speedtest, Backup/Restore, Reboot, Uninstall
+- Protocol Manager (OpenSSH / DNSTT / DT Proxy အခြေအနေ + ထိန်းချုပ်မှု), Traffic Monitor (Lite) + Speedtest
+- Block Torrent (Anti-P2P), SSH Banner, Auto-Reboot Task, Cleanup Expired, Backup/Restore, Uninstall [99]
 - သက်တမ်းကုန် အကောင့်တွေ နာရီတိုင်း အလိုအလျောက် ဖျက်ပေးတယ်
 - Multi-login limit ကို မိနစ်တိုင်း စစ်ပြီး ပိုနေတဲ့ connection တွေ ပိတ်ပေးတယ်
 
