@@ -192,7 +192,7 @@ glyph() {
 }
 
 banner_text() {
-    local word="$1" rows=("" "" "" "" "") i ch g r
+    local word="$1" color="${2:-$M}" rows=("" "" "" "" "") i ch g r
     for (( i=0; i<${#word}; i++ )); do
         ch="${word:i:1}"
         g="$(glyph "$ch")"
@@ -200,7 +200,7 @@ banner_text() {
             rows[$r]+="$(echo "$g" | cut -d'|' -f$((r+1))) "
         done
     done
-    for r in 0 1 2 3 4; do echo -e "${M}      ${rows[$r]}${N}"; done
+    for r in 0 1 2 3 4; do rows[$r]="${rows[$r]//\#/█}"; echo -e "${color}        ${rows[$r]}${N}"; done
 }
 
 header() {
@@ -212,22 +212,22 @@ header() {
     users="$(managed_users | wc -l)"
     sessions="$(who 2>/dev/null | wc -l)"
     load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
-    echo -e "${C}----------------------------------------------------------------------${N}"
-    banner_text "KOK"
-    banner_text "MANAGER"
-    echo -e "${C}----------------------------------------------------------------------${N}"
-    echo -e "              ${C}PREMIUM SSH & VPN SERVICES${N}"
-    echo -e "              ${Y}Developed by: KOK ${N}<🇲🇲/>"
-    echo -e " ${Y}System License Expiry : ${G}Lifetime (Verified)${N}"
-    echo -e "${C}----------------------------------------------------------------------${N}"
-    echo -e "${B}======================================================================${N}"
-    printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "OS" "$osname" "Uptime:" "$up"
-    printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "Memory" "$mem" "Online Sessions:" "$sessions"
-    printf " ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "Users" "$users Managed Accounts" "Sys Load (1m):" "$load"
-    echo -e "${B}======================================================================${N}"
+    echo -e "${C}╔════════════════════════════════════════════════════════════════════╗${N}"
+    banner_text "KOK" "$M"
+    banner_text "MANAGER" "$C"
+    echo -e "${C}╠════════════════════════════════════════════════════════════════════╣${N}"
+    echo -e "${C}║${N}   ${W}✦ PREMIUM SSH & VPN SERVICES ✦${N}"
+    echo -e "${C}║${N}   ${Y}Developed by: KOK${N} <🇲🇲/>"
+    echo -e "${C}║${N}   ${Y}System License Expiry : ${G}Lifetime (Verified)${N}"
+    echo -e "${C}╚════════════════════════════════════════════════════════════════════╝${N}"
+    echo -e "${B}═══════════════════════[ 🖥  SYSTEM INFO ]═══════════════════════${N}"
+    printf " ${B}▌${N} ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "OS" "$osname" "Uptime:" "$up"
+    printf " ${B}▌${N} ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "Memory" "$mem" "Online Sessions:" "$sessions"
+    printf " ${B}▌${N} ${W}%-10s${N} ${G}%-28s${N} ${W}|${N} ${W}%-17s${N} ${G}%s${N}\n" "Users" "$users Managed Accounts" "Sys Load (1m):" "$load"
+    echo -e "${B}══════════════════════════════════════════════════════════════════════${N}"
 }
 
-section() { echo -e "${M}═══════════════[ $1 ]═══════════════${N}"; }
+section() { echo -e "${M}═══════ ✦ ${W}$1${M} ✦ ═══════${N}"; }
 
 # ---------- account actions ----------
 create_account() {
@@ -1702,24 +1702,24 @@ check_activation
 while true; do
     header
     section "👤  USER MANAGEMENT"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "1" "Create New User" "5" "Unlock User Account"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "2" "Delete User" "6" "Edit User Details"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "3" "Renew User Account" "7" "List Managed Users"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "4" "Lock User Account" "8" "Generate Client Config"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "1" "Create New User" "5" "Unlock User Account"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "2" "Delete User" "6" "Edit User Details"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "3" "Renew User Account" "7" "List Managed Users"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "4" "Lock User Account" "8" "Generate Client Config"
     echo
     section "🌐  VPN & PROTOCOLS"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "9" "Protocol Manager" "11" "Traffic Monitor (Lite)"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "10" "DT Proxy Manager" "12" "Block Torrent (Anti-P2P)"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "9" "Protocol Manager" "11" "Traffic Monitor (Lite)"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "10" "DT Proxy Manager" "12" "Block Torrent (Anti-P2P)"
     echo
     section "⚙️   SYSTEM SETTINGS"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "13" "CloudFlare Free Domain" "16" "Backup User Data"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "14" "SSH Banner Config" "17" "Restore User Data"
-    printf "  ${C}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "15" "Auto-Reboot Task" "18" "Cleanup Expired Users"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "13" "CloudFlare Free Domain" "16" "Backup User Data"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "14" "SSH Banner Config" "17" "Restore User Data"
+    printf " ${M}▌${N} ${Y}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "15" "Auto-Reboot Task" "18" "Cleanup Expired Users"
     echo
-    echo -e "${R}═══════════════[ 🔥  DANGER ZONE ]═══════════════${N}"
-    printf "  ${R}[%2s]${N} ${G}%-28s${N}  ${C}[%2s]${N} ${G}%s${N}\n" "99" "Uninstall Script" "0" "Exit"
+    echo -e "${R}═══════ ✦ ${W}🔥  DANGER ZONE${R} ✦ ═══════${N}"
+    printf " ${R}▌${N} ${R}[%2s]${N} ${G}%-28s${N}  ${Y}[%2s]${N} ${G}%s${N}\n" "99" "Uninstall Script" "0" "Exit"
     echo
-    read -rp "👉 Select an option: " choice
+    printf "${Y}➤${N} ${W}Select an option:${N} "; read -r choice
     case "$choice" in
         1) create_account ;;
         2) delete_account ;;
