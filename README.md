@@ -27,6 +27,21 @@ menu
 - သက်တမ်းကုန် အကောင့်တွေ နာရီတိုင်း အလိုအလျောက် ဖျက်ပေးတယ်
 - Multi-login limit ကို မိနစ်တိုင်း စစ်ပြီး ပိုနေတဲ့ connection တွေ ပိတ်ပေးတယ်
 
+## DNSTT (SlowDNS)
+
+Menu ထဲက `[16] DNSTT (SlowDNS)`:
+
+- **Setup** – Nameserver (tunnel domain) ထည့်၊ key ရွေး:
+  - Auto-generate, ဒါမှမဟုတ်
+  - **ကိုယ်ပိုင် Private Key** – ကိုယ်ကြိုက်တဲ့ ဂဏန်း/စာလုံး (0-9, a-f) အလုံး ၆၄ လုံး ထည့်လို့ရတယ်။
+    Public Key က အဲဒီ private key ကနေ တွက်ထွက်တာမို့ **ဆာဗာ ဘယ်နှလုံးတပ်တပ် private key တူရင် Public Key အမြဲ တူတူပဲ** — customer တွေကို key တစ်ခု တည်းပေးရုံပဲ။
+- Setup ပြီးရင် **DNS record ၂ ခု** ထည့်ရမယ် (menu က ဘာထည့်ရမလဲ ပြပေးတယ်):
+  1. `A` record: `ns.<မင်း domain>` → ဆာဗာ IP
+  2. `NS` record: `<tunnel domain>` → `ns.<မင်း domain>` (Cloudflare မှာ DNS only / grey cloud)
+- **Show Info** – customer တွေကို ပေးဖို့ Nameserver + Public Key ကို အသင့် ပြပေးတယ်
+- Restart / Remove လည်း menu ထဲမှာပဲ
+- dnstt-server ကို ပထမဆုံး setup မှာ အလိုအလျောက် build လုပ်တယ် (Go လိုတယ် — မရှိရင် အလိုအလျောက် တပ်ပေးတယ်)၊ UDP 53 ကို 5300 သို့ redirect လုပ်ပြီး systemd service အနေနဲ့ run တယ်
+
 ## Serial Key အသစ် ထုတ်နည်း (ပိုင်ရှင်အတွက်)
 
 ```bash
